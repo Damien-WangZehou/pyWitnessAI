@@ -11,6 +11,7 @@ from .DataFlattener import *
 from PIL import Image
 import heapq
 from deepface import DeepFace
+from retinaface import RetinaFace
 import dlib
 from deepface.commons import functions
 # You should also load the path of cascade, similarity_model, lineup_images before using the analyzer
@@ -514,6 +515,46 @@ class FrameAnalyzerMTCNN:
             coordinates.append(face['box'])
 
         return coordinates
+
+
+class FrameAnalyzerRetinaface:
+    def __init__(self, name='retinaface'):
+        self.name = name
+
+    def analyze_frame(self, frame):
+        faces = RetinaFace.detect_faces(frame)
+        face_count = len(faces)
+        face_area = self.get_face_area(faces)
+        confidence = self.get_confidence(faces)
+        avg_confidence = np.mean(confidence) if confidence else 0  # Calculate the average confidence
+        coordinates = self.get_face_coordinates(faces)
+        return{
+            f'face_count': face_count,
+            f'face_area': face_area,
+            f'confidence': confidence,
+            f'average_confidence': avg_confidence,
+            f'coordinate': coordinates,
+        }
+
+    def get_face_area(self, faces):
+        face_area_sum = sum(face['facial_area'][2] * face['facial_area'][3] for face in faces)
+        return face_area_sum
+
+    def get_face_coordinates(self, faces):
+        coordinates = []
+
+        for face in faces:
+            coordinates.append(face['facial_area'])
+
+        return coordinates
+
+    def get_confidence(self, faces):
+        confidence = []
+
+        for face in faces:
+            confidence.append(face['score'])
+
+        return confidence
 
 
 class FrameAnalyzerOpenCV:
