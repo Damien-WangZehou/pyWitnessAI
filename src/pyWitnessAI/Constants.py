@@ -22,6 +22,7 @@ legend_colors = {
     'mean': colors['green'],
     'mtcnn': colors['blue'],
     'opencv': colors['red'],
+    'retinaface': colors['cyan'],
     'lineup': colors['gray']
 
 }
@@ -29,6 +30,8 @@ legend_colors = {
 line_styles = {
     'mtcnn': '-',
     'opencv': '--',
-    'lineup': '-.'
+    'retinaface': '-.-',
+    'lineup': '-.',
 }
+
 
