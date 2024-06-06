@@ -11,7 +11,9 @@ dependencies = [
     "numpy",
     "matplotlib",
     "ipython",
-    "cv"
+    "cv",
+    "facenet-pytorch",
+    "tf-keras"
 ]
 
 [project.optional-dependencies]
