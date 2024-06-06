@@ -609,7 +609,7 @@ class FrameProcessorSharpening:
         kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
         return cv.filter2D(frame, -1, kernel)
 
-
+'''
 class FrameAnalyzerMTCNNIndependent:
     def __init__(self, name="mtcnn_old"):
         self.detector = MTCNN()
@@ -663,8 +663,9 @@ class FrameAnalyzerMTCNNIndependent:
             coordinates.append(face['box'])
 
         return coordinates
+'''
 
-
+'''
 class FrameAnalyzerOpenCVIndependent:
     def __init__(self,
                  cascade_path=str(files("pyWitnessAI.OpenCV_Models").joinpath("haarcascade_frontalface_alt.xml")),
@@ -698,7 +699,7 @@ class FrameAnalyzerOpenCVIndependent:
         for (x, y, w, h) in faces:
             coordinates.append([x, y, w, h])
         return coordinates
-
+'''
 
 class FrameAnalyzerDeepface:
     def __init__(self, detector_backend='mtcnn'):
