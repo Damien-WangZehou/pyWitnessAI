@@ -954,6 +954,23 @@ class FrameAnalyzerFastMTCNN:
             'coordinates': coordinates
         }
 
+class FrameProcessorStillWriter:
+    def __init__(self, frame_numbers=[], name="framestillwriter",
+                 file_name_stub="", selection=None):
+        self.frame_number = 0
+        self.frame_numbers = frame_numbers
+        self.name = name
+        self.file_name_stub = file_name_stub
+        self.selection = selection
+
+    def process_frame(self, frame):
+
+        if self.frame_number in self.frame_numbers :
+            print("FrameProcessorStillWriter> process_frame",self.frame_number)
+            im = Image.fromarray(frame)
+            im.save(self.file_name_stub+"_frame_"+str(self.frame_number)+".jpg")
+
+        self.frame_number += 1
 
 class SimilarityAnalyzer:
     def __init__(self, lineup_faces, detector=None,
