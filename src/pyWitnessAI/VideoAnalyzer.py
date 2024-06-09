@@ -73,6 +73,8 @@ class VideoAnalyzer:
             if not ret:
                 break
 
+            frame = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
+
             if frame_count == frame_start:
                 self.frame_total = self.cap.get(cv.CAP_PROP_FRAME_COUNT)
                 self.get_frame_info()
