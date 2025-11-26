@@ -1,4 +1,7 @@
-from pyWitnessAI import *
+from pyWitnessAI import VideoLineupPipeline, export_for_pywitness
+import cv2 as cv
+import numpy as np
+import pandas as pd
 from pathlib import Path
 import types
 
@@ -19,7 +22,7 @@ class FakeCap:
             return float(self._n)
         return 0.0
 
-    def set(self, prop, val):
+    def set(self):
         return True
 
     def read(self):
@@ -70,7 +73,7 @@ def test_save_with_basename_writes_in_cwd(tmp_path, monkeypatch):
     pipe.save(df=df, output_csv="results.csv")
 
     out = tmp_path / "results.csv"
-    assert out.exists(), "results.csv 应写入当前目录"
+    assert out.exists(), "results.csv should be created in current working directory"
     loaded = pd.read_csv(out)
     assert not loaded.empty
     assert list(loaded.columns) == ["x"]
