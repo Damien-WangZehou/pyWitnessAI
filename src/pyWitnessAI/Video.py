@@ -1,15 +1,9 @@
-import os
-import pandas as pd
 import cv2 as cv
 import numpy as np
 import matplotlib.pyplot as plt
-from mtcnn import MTCNN
-from .Constants import legend_colors, line_styles, get_color_for_analyzer, get_style_for_analyzer
-from keras.models import load_model
-from importlib.resources import files
-from .DataFlattener import *
+from pyWitnessAI.utils.Constants import legend_colors, get_color_for_analyzer, get_style_for_analyzer
+from pyWitnessAI.utils.DataFlattener import *
 from .ImagesCategorizer import *
-from PIL import Image
 import heapq
 from deepface import DeepFace
 import time

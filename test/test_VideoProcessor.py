@@ -1,4 +1,6 @@
-from .Video import *
+from pyWitnessAI.Video import *
+from pyWitnessAI.VideoAI import *
+from pyWitnessAI.VideoProcessor import *
 
 
 def exclude_test():
