@@ -12,7 +12,7 @@ import time
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
-class VideoAnalyzer:
+class Video:
     def __init__(self, video_path, save_directory='Video analysis results'):
         self.video_path = video_path
         self.cap = cv.VideoCapture(video_path)
