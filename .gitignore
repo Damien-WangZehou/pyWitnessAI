@@ -27,7 +27,7 @@ venv/
 .DS_Store
 
 # Project data/outputs (Retain or move data.gitkeep as needed)
-data/
+#data/
 logs/
 outputs/
 test/output.txt
