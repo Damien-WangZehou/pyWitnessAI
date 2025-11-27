@@ -7,7 +7,7 @@ name = "pyWitnessAI"
 description = "DeepFace-based facial recognition utilities"
 # Use setuptools_scm to derive the version from Git tags; see [tool.setuptools_scm] below.
 dynamic = ["version"]
-requires-python = ">=3.10,<3.11"
+requires-python = ">=3.10"
 authors = [
   { name = "Stewart Boogert", email = "sboogert@mac.com" },
   { name = "Damien Wang", email = "damien.wang@bristol.ac.uk" }
@@ -15,14 +15,18 @@ authors = [
 
 # Core minimal dependencies. Keep this light; heavy/fragile deps are moved to extras.
 dependencies = [
-  "numpy==1.26.4",
-  "pandas==2.2.2",
-  "pillow==10.3.0"
+  "cv",
+  "deepface",
+  "matplotlib",
+  "ipython",
+  "numpy",
+  "pandas",
+  "pillow",
 ]
 
 [project.optional-dependencies]
 # One-shot CPU bundle: DeepFace + YOLOv11 + InsightFace (Buffalo_L) + notebook-safe pins.
-full-cpu = [
+wrap-up = [
   "deepface==0.0.95",
   "tensorflow==2.12.1",
   "keras==2.12.0",
