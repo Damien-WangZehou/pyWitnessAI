@@ -15,7 +15,6 @@ except ImportError:
 sys.modules.setdefault("tensorflow.keras", _tf_keras)
 sys.modules.setdefault("tensorflow.keras.models", _tf_keras.models)
 
-from deepface import DeepFace 
 from deepface import DeepFace
 from facenet_pytorch import MTCNN, InceptionResnetV1
 import torch
