@@ -21,15 +21,20 @@ dependencies = [
   "ipython",
   "numpy",
   "pandas",
-  "pillow",
-#  "tf-keras",
-  "typing_extensions",
-  "requests",
-  "tensorflow==2.15.0",
-  "keras==2.15.0",
-  "absl-py<2.0.0",
-  "gast==0.6.0",
-  "facenet-pytorch"
+  "facenet-pytorch",
+  "tf-keras",               # For RetinaFace from deepface module
+
+#  "pillow",
+#  "typing_extensions",
+#  "requests",
+#  "tensorflow==2.15.0",
+#  "keras==2.15.0",
+#  "absl-py<2.0.0",
+#  "gast==0.6.0",
+#  "tensorflow",
+#  "keras",
+#  "absl-py",
+#  "gast",
 ]
 
 [project.optional-dependencies]
