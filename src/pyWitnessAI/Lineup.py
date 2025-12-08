@@ -1,5 +1,4 @@
 import os
-import glob
 import random
 import logging
 from PIL import Image
