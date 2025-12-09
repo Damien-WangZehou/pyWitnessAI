@@ -171,7 +171,7 @@ class VideoLineupPipeline:
                  lineup: Lineup,
                  cfg: PipelineConfig | dict = PipelineConfig()):
         self.video_path = video_path
-        self.lineup_loader = lineup_loader
+        self.lineup_loader = lineup
 
         if isinstance(cfg, dict):
             self.cfg = PipelineConfig(**cfg)
