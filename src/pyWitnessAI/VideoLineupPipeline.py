@@ -168,7 +168,7 @@ class VideoLineupPipeline:
 
     def __init__(self,
                  video_path: str,
-                 lineup_loader: Lineup,
+                 lineup: Lineup,
                  cfg: PipelineConfig | dict = PipelineConfig()):
         self.video_path = video_path
         self.lineup_loader = lineup_loader
