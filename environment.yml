@@ -1,0 +1,14 @@
+name: pyWitnessAI
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - cmake
+  - dlib
+  - pip
+  - pip:
+      - mtcnn
+      - retina-face
+      - numpy<2.0
+      - tensorflow==2.16.0
