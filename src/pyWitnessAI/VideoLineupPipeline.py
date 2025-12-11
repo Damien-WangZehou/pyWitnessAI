@@ -393,7 +393,7 @@ class VideoLineupPipeline:
 
         return faces
 
-    def _normalize_summary(self, summary: Dict[str, object]) -> Dict[str, object]:
+    def _normalize_summary(self, summary: dict[str, object]) -> dict[str, object]:
         """
         Ensure all expected keys are present in the summary dict.
         """
@@ -412,7 +412,7 @@ class VideoLineupPipeline:
         base.update(summary or {})
         return base
 
-    def _decide_summary(self, sim_df: pd.DataFrame) -> Dict[str, object]:
+    def _decide_summary(self, sim_df: pd.DataFrame) -> dict[str, object]:
         """
         Decide the summary for the frame based on the identifier settings and roles.
         Choices: decide_macro, decide_tp_or_ta, decide (simple)
