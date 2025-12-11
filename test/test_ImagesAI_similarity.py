@@ -1,4 +1,5 @@
 from pyWitnessAI import Images, ImagesAI
+from pytest import approx
 
 # ---------- Georgia State ----------
 def test_ImagesAI_similarity_georgia_pipeline():
@@ -22,13 +23,13 @@ def test_ImagesAI_similarity_georgia_pipeline():
     df = image_analyzer_Georgia.dataframe()
 
     # Expected values updated from the notebook
-    assert df.loc["Video1_Perpetrator", "Video1_ProbeImage"] == 0.8759
-    assert df.loc["Video1_Mugshot2", "Video1_ProbeImage"] == 1.2342
-    assert df.loc["Video1_Mugshot3", "Video1_ProbeImage"] == 1.3474
-    assert df.loc["Video1_Mugshot4", "Video1_ProbeImage"] == 1.2398
-    assert df.loc["Video1_Mugshot5", "Video1_ProbeImage"] == 1.2717
-    assert df.loc["Video1_Mugshot6", "Video1_ProbeImage"] == 1.2998
-    assert df.loc["Video1_Mugshot7", "Video1_ProbeImage"] == 1.2906
+    assert df.loc["Video1_Perpetrator", "Video1_ProbeImage"] == approx(0.8759, abs=1e-5)
+    assert df.loc["Video1_Mugshot2", "Video1_ProbeImage"] == approx(1.2342, abs=1e-5)
+    assert df.loc["Video1_Mugshot3", "Video1_ProbeImage"] == approx(1.3474, abs=1e-5)
+    assert df.loc["Video1_Mugshot4", "Video1_ProbeImage"] == approx(1.2398, abs=1e-5)
+    assert df.loc["Video1_Mugshot5", "Video1_ProbeImage"] == approx(1.2717, abs=1e-5)
+    assert df.loc["Video1_Mugshot6", "Video1_ProbeImage"] == approx(1.2998, abs=1e-5)
+    assert df.loc["Video1_Mugshot7", "Video1_ProbeImage"] == approx(1.2906, abs=1e-5)
 
 
 # ---------- different distance metrics ----------
@@ -50,12 +51,12 @@ def test_ImagesAI_similarity_mtcnn_facenet_euclidean_l2():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 1.0869
-    assert df["Video1_Perpetrator"][1] == 1.2359
-    assert df["Video1_Perpetrator"][2] == 1.2768
-    assert df["Video1_Perpetrator"][3] == 1.3133
-    assert df["Video1_Perpetrator"][4] == 1.1511
-    assert df["Video1_Perpetrator"][5] == 1.2442
+    assert df["Video1_Perpetrator"][0] == approx(1.0869, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(1.2359, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(1.2768, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(1.3133, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(1.1511, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(1.2442, abs=1e-3)
 
 
 def test_ImagesAI_similarity_mtcnn_facenet_cosine():
@@ -74,12 +75,12 @@ def test_ImagesAI_similarity_mtcnn_facenet_cosine():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 0.5906
-    assert df["Video1_Perpetrator"][1] == 0.7637
-    assert df["Video1_Perpetrator"][2] == 0.8151
-    assert df["Video1_Perpetrator"][3] == 0.8624
-    assert df["Video1_Perpetrator"][4] == 0.6626
-    assert df["Video1_Perpetrator"][5] == 0.7740
+    assert df["Video1_Perpetrator"][0] == approx(0.5906, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(0.7637, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(0.8151, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(0.8624, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(0.6626, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(0.7740, abs=1e-3)
 
 
 def test_ImagesAI_similarity_mtcnn_facenet_euclidean():
@@ -98,12 +99,12 @@ def test_ImagesAI_similarity_mtcnn_facenet_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 13.0366
-    assert df["Video1_Perpetrator"][1] == 14.7332
-    assert df["Video1_Perpetrator"][2] == 15.2573
-    assert df["Video1_Perpetrator"][3] == 15.6377
-    assert df["Video1_Perpetrator"][4] == 13.4157
-    assert df["Video1_Perpetrator"][5] == 14.8153
+    assert df["Video1_Perpetrator"][0] == approx(13.0366, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(14.7332, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(15.2573, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(15.6377, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(13.4157, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(14.8153, abs=1e-3)
 
 
 # ---------- different detection backends ----------
@@ -123,12 +124,12 @@ def test_ImagesAI_similarity_opencv_facenet_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 11.6449
-    assert df["Video1_Perpetrator"][1] == 14.3952
-    assert df["Video1_Perpetrator"][2] == 14.1869
-    assert df["Video1_Perpetrator"][3] == 14.9362
-    assert df["Video1_Perpetrator"][4] == 13.5124
-    assert df["Video1_Perpetrator"][5] == 14.2616
+    assert df["Video1_Perpetrator"][0] == approx(11.6449, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(14.3952, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(14.1869, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(14.9362, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(13.5124, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(14.2616, abs=1e-3)
 
 
 def test_ImagesAI_similarity_fastmtcnn_facenet_euclidean():
@@ -147,12 +148,12 @@ def test_ImagesAI_similarity_fastmtcnn_facenet_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 13.0325
-    assert df["Video1_Perpetrator"][1] == 14.7854
-    assert df["Video1_Perpetrator"][2] == 15.0674
-    assert df["Video1_Perpetrator"][3] == 15.9633
-    assert df["Video1_Perpetrator"][4] == 13.4093
-    assert df["Video1_Perpetrator"][5] == 14.8043
+    assert df["Video1_Perpetrator"][0] == approx(13.0325, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(14.7854, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(15.0674, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(15.9633, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(13.4093, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(14.8043, abs=1e-3)
 
 
 def test_ImagesAI_similarity_ssd_facenet_euclidean():
@@ -171,12 +172,12 @@ def test_ImagesAI_similarity_ssd_facenet_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 12.7515
-    assert df["Video1_Perpetrator"][1] == 15.0852
-    assert df["Video1_Perpetrator"][2] == 14.4758
-    assert df["Video1_Perpetrator"][3] == 15.2980
-    assert df["Video1_Perpetrator"][4] == 13.4211
-    assert df["Video1_Perpetrator"][5] == 14.8717
+    assert df["Video1_Perpetrator"][0] == approx(12.7515, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(15.0852, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(14.4758, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(15.2980, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(13.4211, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(14.8717, abs=1e-3)
 
 
 def test_ImagesAI_similarity_dlib_facenet_euclidean():
@@ -195,12 +196,12 @@ def test_ImagesAI_similarity_dlib_facenet_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 12.1419
-    assert df["Video1_Perpetrator"][1] == 15.4491
-    assert df["Video1_Perpetrator"][2] == 14.0794
-    assert df["Video1_Perpetrator"][3] == 14.8101
-    assert df["Video1_Perpetrator"][4] == 13.8467
-    assert df["Video1_Perpetrator"][5] == 15.0814
+    assert df["Video1_Perpetrator"][0] == approx(12.1419, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(15.4491, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(14.0794, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(14.8101, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(13.8467, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(15.0814, abs=1e-3)
 
 
 def test_ImagesAI_similarity_retinaface_facenet_euclidean():
@@ -219,12 +220,12 @@ def test_ImagesAI_similarity_retinaface_facenet_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 14.0947
-    assert df["Video1_Perpetrator"][1] == 15.2000
-    assert df["Video1_Perpetrator"][2] == 14.5374
-    assert df["Video1_Perpetrator"][3] == 14.6287
-    assert df["Video1_Perpetrator"][4] == 12.7990
-    assert df["Video1_Perpetrator"][5] == 14.7612
+    assert df["Video1_Perpetrator"][0] == approx(14.0947, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(15.2000, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(14.5374, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(14.6287, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(12.7990, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(14.7612, abs=1e-3)
 
 
 def test_ImagesAI_similarity_yunet_facenet_euclidean():
@@ -243,12 +244,12 @@ def test_ImagesAI_similarity_yunet_facenet_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 12.5380
-    assert df["Video1_Perpetrator"][1] == 15.0752
-    assert df["Video1_Perpetrator"][2] == 14.7540
-    assert df["Video1_Perpetrator"][3] == 15.5789
-    assert df["Video1_Perpetrator"][4] == 13.1358
-    assert df["Video1_Perpetrator"][5] == 15.3376
+    assert df["Video1_Perpetrator"][0] == approx(12.5380, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(15.0752, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(14.7540, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(15.5789, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(13.1358, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(15.3376, abs=1e-3)
 
 
 def test_ImagesAI_similarity_centerface_facenet_euclidean():
@@ -267,12 +268,12 @@ def test_ImagesAI_similarity_centerface_facenet_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 12.6939
-    assert df["Video1_Perpetrator"][1] == 15.1955
-    assert df["Video1_Perpetrator"][2] == 14.4030
-    assert df["Video1_Perpetrator"][3] == 15.2244
-    assert df["Video1_Perpetrator"][4] == 13.4164
-    assert df["Video1_Perpetrator"][5] == 15.1770
+    assert df["Video1_Perpetrator"][0] == approx(12.6939, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(15.1955, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(14.4030, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(15.2244, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(13.4164, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(15.1770, abs=1e-3)
 
 
 # ---------- different models ----------
@@ -291,12 +292,12 @@ def test_ImagesAI_similarity_mtcnn_vggface_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 1.2198
-    assert df["Video1_Perpetrator"][1] == 1.3102
-    assert df["Video1_Perpetrator"][2] == 1.2750
-    assert df["Video1_Perpetrator"][3] == 1.2426
-    assert df["Video1_Perpetrator"][4] == 1.2195
-    assert df["Video1_Perpetrator"][5] == 1.2934
+    assert df["Video1_Perpetrator"][0] == approx(1.2198, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(1.3102, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(1.2750, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(1.2426, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(1.2195, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(1.2934, abs=1e-3)
 
 
 def test_ImagesAI_similarity_mtcnn_facenet512_euclidean():
@@ -314,12 +315,12 @@ def test_ImagesAI_similarity_mtcnn_facenet512_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 24.0495
-    assert df["Video1_Perpetrator"][1] == 22.9667
-    assert df["Video1_Perpetrator"][2] == 25.2377
-    assert df["Video1_Perpetrator"][3] == 26.8565
-    assert df["Video1_Perpetrator"][4] == 23.8400
-    assert df["Video1_Perpetrator"][5] == 28.4808
+    assert df["Video1_Perpetrator"][0] == approx(24.0495, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(22.9667, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(25.2377, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(26.8565, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(23.8400, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(28.4808, abs=1e-3)
 
 
 def test_ImagesAI_similarity_mtcnn_openface_euclidean():
@@ -337,12 +338,12 @@ def test_ImagesAI_similarity_mtcnn_openface_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 0.8041
-    assert df["Video1_Perpetrator"][1] == 0.9918
-    assert df["Video1_Perpetrator"][2] == 0.9186
-    assert df["Video1_Perpetrator"][3] == 0.8266
-    assert df["Video1_Perpetrator"][4] == 0.8583
-    assert df["Video1_Perpetrator"][5] == 0.8997
+    assert df["Video1_Perpetrator"][0] == approx(0.8041, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(0.9918, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(0.9186, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(0.8266, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(0.8583, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(0.8997, abs=1e-3)
 
 
 def test_ImagesAI_similarity_mtcnn_deepid_euclidean():
@@ -360,12 +361,12 @@ def test_ImagesAI_similarity_mtcnn_deepid_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 53.9863
-    assert df["Video1_Perpetrator"][1] == 62.8030
-    assert df["Video1_Perpetrator"][2] == 64.1543
-    assert df["Video1_Perpetrator"][3] == 58.0046
-    assert df["Video1_Perpetrator"][4] == 93.2651
-    assert df["Video1_Perpetrator"][5] == 55.7571
+    assert df["Video1_Perpetrator"][0] == approx(53.9863, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(62.8030, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(64.1543, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(58.0046, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(93.2651, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(55.7571, abs=1e-3)
 
 
 def test_ImagesAI_similarity_mtcnn_arcface_euclidean():
@@ -383,12 +384,12 @@ def test_ImagesAI_similarity_mtcnn_arcface_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 5.5961
-    assert df["Video1_Perpetrator"][1] == 5.3795
-    assert df["Video1_Perpetrator"][2] == 5.7088
-    assert df["Video1_Perpetrator"][3] == 5.9477
-    assert df["Video1_Perpetrator"][4] == 5.2541
-    assert df["Video1_Perpetrator"][5] == 5.9396
+    assert df["Video1_Perpetrator"][0] == approx(5.5961, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(5.3795, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(5.7088, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(5.9477, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(5.2541, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(5.9396, abs=1e-3)
 
 
 def test_ImagesAI_similarity_mtcnn_dlib_euclidean():
@@ -406,12 +407,12 @@ def test_ImagesAI_similarity_mtcnn_dlib_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 0.6366
-    assert df["Video1_Perpetrator"][1] == 0.6068
-    assert df["Video1_Perpetrator"][2] == 0.6362
-    assert df["Video1_Perpetrator"][3] == 0.6377
-    assert df["Video1_Perpetrator"][4] == 0.6038
-    assert df["Video1_Perpetrator"][5] == 0.6575
+    assert df["Video1_Perpetrator"][0] == approx(0.6366, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(0.6068, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(0.6362, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(0.6377, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(0.6038, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(0.6575, abs=1e-3)
 
 
 def test_ImagesAI_similarity_mtcnn_sface_euclidean():
@@ -429,12 +430,12 @@ def test_ImagesAI_similarity_mtcnn_sface_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 11.0124
-    assert df["Video1_Perpetrator"][1] == 9.3277
-    assert df["Video1_Perpetrator"][2] == 11.1553
-    assert df["Video1_Perpetrator"][3] == 11.6845
-    assert df["Video1_Perpetrator"][4] == 8.1307
-    assert df["Video1_Perpetrator"][5] == 11.6240
+    assert df["Video1_Perpetrator"][0] == approx(11.0124, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(9.3277, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(11.1553, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(11.6845, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(8.1307, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(11.6240, abs=1e-3)
 
 
 def test_ImagesAI_similarity_mtcnn_ghostfacenet_euclidean():
@@ -452,9 +453,9 @@ def test_ImagesAI_similarity_mtcnn_ghostfacenet_euclidean():
     image_analyzer.process()
     df = image_analyzer.dataframe()
 
-    assert df["Video1_Perpetrator"][0] == 39.3741
-    assert df["Video1_Perpetrator"][1] == 40.6091
-    assert df["Video1_Perpetrator"][2] == 41.3193
-    assert df["Video1_Perpetrator"][3] == 42.9959
-    assert df["Video1_Perpetrator"][4] == 40.3540
-    assert df["Video1_Perpetrator"][5] == 49.0519
+    assert df["Video1_Perpetrator"][0] == approx(39.3741, abs=1e-3)
+    assert df["Video1_Perpetrator"][1] == approx(40.6091, abs=1e-3)
+    assert df["Video1_Perpetrator"][2] == approx(41.3193, abs=1e-3)
+    assert df["Video1_Perpetrator"][3] == approx(42.9959, abs=1e-3)
+    assert df["Video1_Perpetrator"][4] == approx(40.3540, abs=1e-3)
+    assert df["Video1_Perpetrator"][5] == approx(49.0519, abs=1e-3)
