@@ -19,14 +19,12 @@ dependencies = [
     "deepface",
     "matplotlib",
     "ipython",
-    "numpy<2.0",
     "pandas",
     "facenet-pytorch",
-    "tf-keras",                 # For RetinaFace from deepface module
     "mtcnn == 0.1.1",           # Has to be pinned for compatibility
-    "tensorflow == 2.16.1",     # Pinned for compatibility with deepface and keras
-    "keras == 3.0.5",           # Pinned for compatibility with deepface and tensorflow
-    "tf-keras",
+#    "tensorflow == 2.16.1",     # Pinned for compatibility with deepface and keras
+#    "keras == 3.0.5",           # Pinned for compatibility with deepface and tensorflow
+    "tf-keras",                 # For RetinaFace from deepface module
 #  "pillow",
 #  "typing_extensions",
 #  "requests",
