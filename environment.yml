@@ -10,5 +10,5 @@ dependencies:
   - pip:
       - mtcnn
       - retina-face
-      - numpy<2.0
-      - tensorflow==2.16.0
+      - numpy==1.26.4
+      - tensorflow==2.16.1
