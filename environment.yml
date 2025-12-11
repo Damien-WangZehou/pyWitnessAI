@@ -12,3 +12,4 @@ dependencies:
       - retina-face
       - numpy==1.26.4
       - tensorflow==2.16.1
+      - keras == 3.0.5
