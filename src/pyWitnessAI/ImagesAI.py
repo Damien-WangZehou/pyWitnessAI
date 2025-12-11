@@ -6,14 +6,14 @@ import io
 from contextlib import redirect_stdout, redirect_stderr
 import numpy as np
 import pandas as pd
-try:
-    import tensorflow.keras as _tf_keras
-except ImportError:
-    import keras as _tf_keras
-
-# Make sure DeepFace's "from tensorflow.keras.models import ..." imports succeed
-sys.modules.setdefault("tensorflow.keras", _tf_keras)
-sys.modules.setdefault("tensorflow.keras.models", _tf_keras.models)
+# try:
+#     import tensorflow.keras as _tf_keras
+# except ImportError:
+#     import keras as _tf_keras
+#
+# # Make sure DeepFace's "from tensorflow.keras.models import ..." imports succeed
+# sys.modules.setdefault("tensorflow.keras", _tf_keras)
+# sys.modules.setdefault("tensorflow.keras.models", _tf_keras.models)
 
 from deepface import DeepFace
 from facenet_pytorch import MTCNN, InceptionResnetV1
