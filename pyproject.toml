@@ -7,7 +7,7 @@ name = "pyWitnessAI"
 description = "DeepFace-based facial recognition utilities"
 # Use setuptools_scm to derive the version from Git tags; see [tool.setuptools_scm] below.
 dynamic = ["version"]
-requires-python = ">=3.10"
+requires-python = ">=3.10, <3.12"
 authors = [
   { name = "Stewart Boogert", email = "sboogert@mac.com" },
   { name = "Damien Wang", email = "damien.wang@bristol.ac.uk" }
@@ -15,15 +15,18 @@ authors = [
 
 # Core minimal dependencies. Keep this light; heavy/fragile deps are moved to extras.
 dependencies = [
-  "cv",
-  "deepface",
-  "matplotlib",
-  "ipython",
-  "numpy",
-  "pandas",
-  "facenet-pytorch",
-  "tf-keras",               # For RetinaFace from deepface module
-
+    "cv",
+    "deepface",
+    "matplotlib",
+    "ipython",
+    "numpy<2.0",
+    "pandas",
+    "facenet-pytorch",
+    "tf-keras",                 # For RetinaFace from deepface module
+    "mtcnn == 0.1.1",           # Has to be pinned for compatibility
+    "tensorflow == 2.16.1",     # Pinned for compatibility with deepface and keras
+    "keras == 3.0.5",           # Pinned for compatibility with deepface and tensorflow
+    "tf-keras",
 #  "pillow",
 #  "typing_extensions",
 #  "requests",
@@ -71,43 +74,6 @@ wrap-up = [
   "jupyter-client==8.6.1"
 ]
 
-# Optional granular bundles for selective installs.
-tf = [
-  "tensorflow==2.12.1",
-  "keras==2.12.0",
-  "typing-extensions==4.5.0",
-  "mtcnn==0.1.1"
-]
-
-yolo = [
-  "ultralytics>=8.3,<9"
-]
-
-mediapipe = [
-  "mediapipe>=0.10,<0.11"
-]
-
-insight = [
-  "onnxruntime==1.17.3",
-  "insightface==0.7.3",
-  "retina-face>=0.0.14,<0.1"
-]
-
-torchkit = [
-  "torch==1.13.1",
-  "torchvision==0.14.1",
-  "facenet-pytorch==2.5.3"
-]
-
-notebook-pinned = [
-  "ipython==8.12.2",
-  "ipykernel==6.25.2",
-  "jupyter-client==8.6.1"
-]
-
-opencv-contrib = [
-  "opencv-contrib-python==4.11.0.86"
-]
 
 [project.scripts]
 pyWitnessAI = "pyWitnessAI:main"
