@@ -22,61 +22,20 @@ dependencies = [
     "pandas",
     "facenet-pytorch",
     "mtcnn == 0.1.1",           # Has to be pinned for compatibility
+    "tf-keras",                 # For RetinaFace from deepface module
 #    "tensorflow == 2.16.1",     # Pinned for compatibility with deepface and keras
 #    "keras == 3.0.5",           # Pinned for compatibility with deepface and tensorflow
-    "tf-keras",                 # For RetinaFace from deepface module
-#  "pillow",
-#  "typing_extensions",
-#  "requests",
-#  "tensorflow==2.15.0",
-#  "keras==2.15.0",
-#  "absl-py<2.0.0",
-#  "gast==0.6.0",
-#  "tensorflow",
-#  "keras",
-#  "absl-py",
-#  "gast",
+#    "pillow",
+#    "typing_extensions",
+#    "requests",
+#    "absl-py<2.0.0",
+#    "gast==0.6.0",
 ]
 
 [project.optional-dependencies]
-# One-shot CPU bundle: DeepFace + YOLOv11 + InsightFace (Buffalo_L) + notebook-safe pins.
-wrap-up = [
-  "deepface==0.0.95",
-  "tensorflow==2.12.1",
-  "keras==2.12.0",
-  "typing-extensions==4.5.0",
-
-  # Keep only one OpenCV wheel (contrib build includes extra modules like YUNet).
-  "opencv-contrib-python==4.11.0.86",
-  "mtcnn==0.1.1",
-
-  # YOLOv11 and MediaPipe detectors.
-  "ultralytics>=8.3,<9",
-  "mediapipe>=0.10,<0.11",
-
-  # Torch / ONNX / InsightFace (includes Buffalo_L).
-  "torch==1.13.1",
-  "torchvision==0.14.1",
-  "onnxruntime==1.17.3",
-  "insightface==0.7.3",
-  "retina-face>=0.0.14,<0.1",
-  "facenet-pytorch==2.5.3",
-
-  # dlib: prebuilt wheel on Windows, source wheel elsewhere.
-  "dlib-bin==19.24.2; platform_system == 'Windows'",
-  "dlib==19.24.2; platform_system != 'Windows'",
-
-  # Notebook stack pinned to work with typing-extensions==4.5.0.
-  "ipython==8.12.2",
-  "ipykernel==6.25.2",
-  "jupyter-client==8.6.1"
-]
-
 
 [project.scripts]
 pyWitnessAI = "pyWitnessAI:main"
-# You can add maintenance CLIs later, e.g.:
-# pywitnessai-fix-opencv = "pyWitnessAI.cli:fix_opencv"
 
 [project.urls]
 Homepage = "https://github.com/your-org/pyWitnessAI"
