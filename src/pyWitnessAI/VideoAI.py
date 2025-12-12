@@ -66,7 +66,7 @@ class FrameAnalyzerMTCNNIndependent:
 
 class FrameAnalyzerOpenCVIndependent:
     def __init__(self,
-                 cascade_path=str(files("pyWitnessAI.OpenCV_Models").joinpath("haarcascade_frontalface_alt.xml")),
+                 cascade_path=str(files("pyWitnessAI.Local_Models.OpenCV_Models").joinpath("haarcascade_frontalface_alt.xml")),
                  name='opencv_old'):
         self.face_cascade = cv.CascadeClassifier(cascade_path)
         self.name = name
