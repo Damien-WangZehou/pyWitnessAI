@@ -10,10 +10,8 @@ from .Lineup import *
 
 from .LineupDecider import *
 from .VideoLineupPipeline import *
-from .utils import find_bins, plot_hist_with_edges
 
 __all__ = [
-    "plot_hist_with_edges",
     "Images",
     "ImagesAI",
     "Video",
