@@ -33,6 +33,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cfd-pilot = [
+    "sentence-transformers>=2.7",
+    "torch",
+    "Pillow",
+    "tqdm",
+    "openpyxl",
+]
+
 colloff_replication = [
     "deepface==0.0.79",
     "tensorflow==2.14.0",
