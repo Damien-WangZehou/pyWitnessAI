@@ -1,17 +1,22 @@
-from pyWitnessAI.utils.Constants import *
-from .Images import *
-from .ImagesAI import *
+from __future__ import annotations
 
-from .Video import *
-from .VideoAI import *
-from .VideoProcessor import *
+from importlib import import_module
 
-from .Lineup import *
 
-from .LineupDecider import *
-from .VideoLineupPipeline import *
+_OPTIONAL_DEPENDENCIES = {
+    "cv",
+    "cv2",
+    "deepface",
+    "facenet_pytorch",
+    "keras",
+    "mtcnn",
+    "retinaface",
+    "tensorflow",
+    "torch",
+}
 
-__all__ = [
+_EXPORT_MODULES = (
+    "utils.Constants",
     "Images",
     "ImagesAI",
     "Video",
@@ -20,4 +25,44 @@ __all__ = [
     "Lineup",
     "LineupDecider",
     "VideoLineupPipeline",
-]
+)
+_STAR_EXPORTS = {
+    "Images",
+    "ImagesAI",
+    "Video",
+    "VideoAI",
+    "VideoProcessor",
+    "Lineup",
+    "LineupDecider",
+    "VideoLineupPipeline",
+}
+
+__all__: list[str] = []
+_missing_optional_imports: dict[str, str] = {}
+
+
+def _export_public_names(module_path: str) -> None:
+    try:
+        module = import_module(f"{__name__}.{module_path}")
+    except ModuleNotFoundError as exc:
+        if exc.name in _OPTIONAL_DEPENDENCIES:
+            _missing_optional_imports[module_path] = exc.name or "unknown"
+            return
+        raise
+
+    public_names = getattr(
+        module,
+        "__all__",
+        [name for name in dir(module) if not name.startswith("_")],
+    )
+    for name in public_names:
+        globals()[name] = getattr(module, name)
+        if name in _STAR_EXPORTS and name not in __all__:
+            __all__.append(name)
+
+
+for _module_path in _EXPORT_MODULES:
+    _export_public_names(_module_path)
+
+
+del _module_path
