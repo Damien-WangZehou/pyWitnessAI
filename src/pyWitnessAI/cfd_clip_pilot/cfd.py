@@ -31,9 +31,9 @@ KNOWN_EXPRESSION_CODES = {
 COLUMN_ALIASES = {
     "image_id": ("image_id", "image", "file", "filename", "imagefile", "image_file"),
     "target_id": ("target_id", "target", "model", "model_id", "identity", "id"),
-    "gender": ("gender", "sex"),
-    "race": ("race", "ethnicity", "self_reported_race", "selfreportedrace"),
-    "age": ("age", "age_years", "target_age", "estimated_age"),
+    "gender": ("gender", "sex", "genderself"),
+    "race": ("race", "ethnicity", "ethnicityself", "self_reported_race", "selfreportedrace"),
+    "age": ("age", "age_years", "ageself", "agerated", "target_age", "estimated_age"),
     "skin_tone": ("skin_tone", "skintone", "skin", "skin_colour", "skin_color"),
     "hair_colour": ("hair_colour", "hair_color", "haircolour", "haircolor"),
     "hair_length": ("hair_length", "hairlength"),
@@ -41,6 +41,16 @@ COLUMN_ALIASES = {
     "face_shape": ("face_shape", "faceshape"),
     "notable_features": ("notable_features", "features", "distinctive_features"),
 }
+
+RACE_CODE_LABELS = {
+    "A": "Asian",
+    "B": "Black",
+    "I": "Indian",
+    "L": "Latino",
+    "M": "Multiracial",
+    "W": "White",
+}
+GENDER_CODE_LABELS = {"F": "female", "M": "male"}
 
 
 @dataclass(frozen=True)
@@ -51,7 +61,7 @@ class ManifestConfig:
     max_images: int | None = None
 
 
-def load_cfd_metadata(path: str | Path, sheet_name: str | int | None = 0) -> pd.DataFrame:
+def load_cfd_metadata(path: str | Path, sheet_name: str | int | None = None) -> pd.DataFrame:
     """Load CFD norming metadata from CSV, TSV, or Excel."""
     metadata_path = Path(path)
     suffix = metadata_path.suffix.lower()
@@ -61,7 +71,12 @@ def load_cfd_metadata(path: str | Path, sheet_name: str | int | None = 0) -> pd.
     if suffix in {".tsv"}:
         return pd.read_csv(metadata_path, sep="\t")
     if suffix in {".xls", ".xlsx"}:
-        return pd.read_excel(metadata_path, sheet_name=sheet_name)
+        if sheet_name is not None:
+            return _read_cfd_excel_sheet(metadata_path, sheet_name)
+        workbook = pd.ExcelFile(metadata_path)
+        sheets = [sheet for sheet in workbook.sheet_names if "norming data" in sheet.lower()]
+        frames = [_read_cfd_excel_sheet(metadata_path, sheet) for sheet in sheets]
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     raise ValueError(f"Unsupported CFD metadata format: {metadata_path.suffix}")
 
@@ -133,11 +148,18 @@ def expression_from_image_stem(stem: str) -> str:
 
 
 def target_id_from_image_stem(stem: str) -> str:
-    """Remove a CFD expression suffix while keeping the image/identity code intact."""
+    """Derive the CFD model ID used in the norming workbook."""
     parts = stem.replace("_", "-").split("-")
     if parts and parts[-1].upper() in KNOWN_EXPRESSION_CODES:
-        return "-".join(parts[:-1])
-    return stem
+        parts = parts[:-1]
+    if parts and parts[0].upper() == "CFD":
+        parts = parts[1:]
+
+    if len(parts) >= 3 and parts[0].upper() in {"IF", "IM"}:
+        return f"{parts[0].upper()}{parts[1]}-{parts[2]}"
+    if len(parts) >= 2:
+        return f"{parts[0].upper()}-{parts[1]}"
+    return "-".join(parts)
 
 
 def standardise_cfd_metadata(metadata: pd.DataFrame) -> pd.DataFrame:
@@ -146,9 +168,9 @@ def standardise_cfd_metadata(metadata: pd.DataFrame) -> pd.DataFrame:
     slug_to_column = {_slug_column(col): col for col in df.columns}
 
     for canonical, aliases in COLUMN_ALIASES.items():
-        source = _resolve_column(slug_to_column, aliases)
-        if source is not None:
-            df[canonical] = df[source]
+        sources = _resolve_columns(slug_to_column, aliases)
+        if sources:
+            df[canonical] = _coalesce_columns(df, sources)
 
     if "image_id" in df.columns:
         df["image_id"] = df["image_id"].map(_clean_identifier)
@@ -160,7 +182,32 @@ def standardise_cfd_metadata(metadata: pd.DataFrame) -> pd.DataFrame:
     if "target_id" in df.columns:
         df["target_id"] = df["target_id"].map(target_id_from_image_stem)
 
+    if "race" in df.columns:
+        df["race"] = df["race"].map(_label_race)
+    if "gender" in df.columns:
+        df["gender"] = df["gender"].map(_label_gender)
+
     return df
+
+
+def _read_cfd_excel_sheet(metadata_path: Path, sheet_name: str | int) -> pd.DataFrame:
+    raw = pd.read_excel(metadata_path, sheet_name=sheet_name, header=None)
+    header_row = _find_header_row(raw)
+    df = pd.read_excel(metadata_path, sheet_name=sheet_name, header=header_row)
+    df = df.dropna(how="all")
+    df = df[df["Model"].notna()] if "Model" in df.columns else df
+    df = df[df["Model"].astype(str).str.lower() != "r002_mean"] if "Model" in df.columns else df
+    df = df.copy()
+    df["norming_sheet"] = str(sheet_name)
+    return df.reset_index(drop=True)
+
+
+def _find_header_row(raw: pd.DataFrame) -> int:
+    for row_index, row in raw.iterrows():
+        values = {_slug_column(value) for value in row.dropna().tolist()}
+        if "model" in values:
+            return int(row_index)
+    raise ValueError("Could not find the CFD metadata header row containing 'Model'.")
 
 
 def merge_manifest_metadata(manifest: pd.DataFrame, metadata: pd.DataFrame) -> pd.DataFrame:
@@ -189,8 +236,12 @@ def _metadata_lookup(metadata: pd.DataFrame) -> dict[str, dict]:
     for record in metadata.to_dict(orient="records"):
         for column in key_columns:
             key = _clean_identifier(record.get(column, ""))
-            if key and key not in lookup:
+            if not key:
+                continue
+            if key not in lookup:
                 lookup[key] = record
+                continue
+            lookup[key] = _fill_missing_record_values(lookup[key], record)
     return lookup
 
 
@@ -200,6 +251,20 @@ def _resolve_column(slug_to_column: dict[str, str], aliases: Iterable[str]) -> s
         if column is not None:
             return column
     return None
+
+
+def _resolve_columns(slug_to_column: dict[str, str], aliases: Iterable[str]) -> list[str]:
+    columns = []
+    for alias in aliases:
+        column = slug_to_column.get(_slug_column(alias))
+        if column is not None and column not in columns:
+            columns.append(column)
+    return columns
+
+
+def _coalesce_columns(df: pd.DataFrame, columns: list[str]) -> pd.Series:
+    values = df[columns].replace("", pd.NA)
+    return values.bfill(axis=1).iloc[:, 0]
 
 
 def _slug_column(value: object) -> str:
@@ -214,3 +279,32 @@ def _clean_identifier(value: object) -> str:
         if text.lower().endswith(suffix):
             return text[: -len(suffix)]
     return text
+
+
+def _fill_missing_record_values(existing: dict, new: dict) -> dict:
+    merged = dict(existing)
+    for key, value in new.items():
+        if _is_missing(merged.get(key)) and not _is_missing(value):
+            merged[key] = value
+    return merged
+
+
+def _is_missing(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return isinstance(value, str) and value.strip() == ""
+
+
+def _label_race(value: object) -> str:
+    text = _clean_identifier(value)
+    return RACE_CODE_LABELS.get(text.upper(), text)
+
+
+def _label_gender(value: object) -> str:
+    text = _clean_identifier(value)
+    return GENDER_CODE_LABELS.get(text.upper(), text)

@@ -18,34 +18,45 @@ logic stays in the package and the study folder only holds runnable entrypoints.
 
 ```powershell
 python studies\study3_cfd_clip_pilot\01_build_cfd_manifest.py `
-  --image-dir D:\Data\CFD\Images `
-  --metadata-path D:\Data\CFD\CFD_norming.csv `
-  --output studies\study3_cfd_clip_pilot\outputs\manifest.csv
+  --image-dir "data\CFD Version 3.0\Images" `
+  --metadata-path "data\CFD Version 3.0\CFD 3.0 Norming Data and Codebook.xlsx" `
+  --output build\study3_cfd_clip_pilot_outputs\manifest.csv
 
 python studies\study3_cfd_clip_pilot\02_generate_proxy_descriptions.py `
-  --manifest studies\study3_cfd_clip_pilot\outputs\manifest.csv `
-  --output studies\study3_cfd_clip_pilot\outputs\queries.csv
+  --manifest build\study3_cfd_clip_pilot_outputs\manifest.csv `
+  --output build\study3_cfd_clip_pilot_outputs\queries_complete.csv `
+  --require-fields age gender race
 
 python studies\study3_cfd_clip_pilot\03_build_clip_index.py `
-  --manifest studies\study3_cfd_clip_pilot\outputs\manifest.csv `
-  --index-dir studies\study3_cfd_clip_pilot\outputs\clip_index `
+  --manifest build\study3_cfd_clip_pilot_outputs\manifest.csv `
+  --index-dir build\study3_cfd_clip_pilot_outputs\clip_index `
   --model-name clip-ViT-B-32 `
   --batch-size 32 `
   --show-progress
 
 python studies\study3_cfd_clip_pilot\04_evaluate_clip_retrieval.py `
-  --index-dir studies\study3_cfd_clip_pilot\outputs\clip_index `
-  --queries studies\study3_cfd_clip_pilot\outputs\queries.csv `
-  --output-dir studies\study3_cfd_clip_pilot\outputs\evaluation `
+  --index-dir build\study3_cfd_clip_pilot_outputs\clip_index `
+  --queries build\study3_cfd_clip_pilot_outputs\queries_complete.csv `
+  --output-dir build\study3_cfd_clip_pilot_outputs\evaluation `
   --top-k 50
 
 python studies\study3_cfd_clip_pilot\05_build_clip_filler_sets.py `
-  --index-dir studies\study3_cfd_clip_pilot\outputs\clip_index `
-  --queries studies\study3_cfd_clip_pilot\outputs\queries.csv `
-  --output studies\study3_cfd_clip_pilot\outputs\filler_sets.csv `
+  --index-dir build\study3_cfd_clip_pilot_outputs\clip_index `
+  --queries build\study3_cfd_clip_pilot_outputs\queries_complete.csv `
+  --output build\study3_cfd_clip_pilot_outputs\filler_sets.csv `
   --top-k 50 `
   --filler-count 5
 ```
+
+Install the optional CLIP dependencies before running steps 3-5:
+
+```powershell
+pip install -e ".[cfd-pilot]"
+```
+
+Step 2 can also write a broader `queries.csv` without `--require-fields`; for
+the proxy-description pilot, `queries_complete.csv` is cleaner because it drops
+targets missing age, gender, or race annotations.
 
 ## Inputs
 

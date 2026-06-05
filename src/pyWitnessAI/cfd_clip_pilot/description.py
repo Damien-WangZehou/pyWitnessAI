@@ -32,14 +32,19 @@ def build_proxy_descriptions(
     manifest: pd.DataFrame,
     unique_by: str = "target_id",
     template: DescriptionTemplate | None = None,
+    required_fields: tuple[str, ...] | list[str] | None = None,
 ) -> pd.DataFrame:
     """Build one CLIP query per target/image from CFD annotations."""
     if unique_by not in manifest.columns:
         raise ValueError(f"unique_by column is missing from manifest: {unique_by}")
 
     template = template or DescriptionTemplate()
+    data = manifest.copy()
+    if required_fields:
+        data = _drop_missing_required_fields(data, required_fields)
+
     queries = (
-        manifest.sort_values(["target_id", "image_id"])
+        data.sort_values(["target_id", "image_id"])
         .drop_duplicates(unique_by, keep="first")
         .copy()
     )
@@ -82,7 +87,7 @@ def render_cfd_description(
     for field in template.fields:
         if field in {"age", "race", "gender"}:
             continue
-        value = _clean_value(row.get(field))
+        value = _clean_detail_value(row.get(field))
         if value:
             label = field.replace("_", " ")
             detail_parts.append(f"{label}: {value.lower()}")
@@ -116,3 +121,28 @@ def _age_phrase(value: object) -> str:
     if age.is_integer():
         return f"around {int(age)} years old"
     return f"around {age:.1f} years old"
+
+
+def _clean_detail_value(value: object) -> str:
+    text = _clean_value(value)
+    if not text:
+        return ""
+    try:
+        float(text)
+    except ValueError:
+        return text
+    return ""
+
+
+def _drop_missing_required_fields(
+    dataframe: pd.DataFrame,
+    required_fields: tuple[str, ...] | list[str],
+) -> pd.DataFrame:
+    missing_columns = [field for field in required_fields if field not in dataframe.columns]
+    if missing_columns:
+        raise ValueError(f"Required fields are missing from manifest: {missing_columns}")
+
+    mask = pd.Series(True, index=dataframe.index)
+    for field in required_fields:
+        mask &= dataframe[field].map(_clean_value).astype(bool)
+    return dataframe[mask].copy()

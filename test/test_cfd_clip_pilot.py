@@ -48,7 +48,7 @@ def _dummy_index():
 
 def test_cfd_filename_parsing_removes_neutral_suffix():
     assert expression_from_image_stem("CFD-WM-001-001-N") == "N"
-    assert target_id_from_image_stem("CFD-WM-001-001-N") == "CFD-WM-001-001"
+    assert target_id_from_image_stem("CFD-WM-001-001-N") == "WM-001"
 
 
 def test_standardise_cfd_metadata_maps_common_columns():
@@ -63,7 +63,7 @@ def test_standardise_cfd_metadata_maps_common_columns():
 
     standardised = standardise_cfd_metadata(metadata)
 
-    assert standardised.loc[0, "target_id"] == "CFD-WM-001-001"
+    assert standardised.loc[0, "target_id"] == "WM-001"
     assert standardised.loc[0, "gender"] == "Male"
     assert standardised.loc[0, "race"] == "White"
     assert standardised.loc[0, "age"] == 27

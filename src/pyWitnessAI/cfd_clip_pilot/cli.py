@@ -39,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
     descriptions.add_argument("--manifest", required=True, help="Manifest CSV.")
     descriptions.add_argument("--output", required=True, help="Output query CSV.")
     descriptions.add_argument("--unique-by", default="target_id", help="Column used to create one query per item.")
+    descriptions.add_argument(
+        "--require-fields",
+        nargs="+",
+        default=None,
+        help="Drop rows missing these fields before generating proxy descriptions.",
+    )
     descriptions.set_defaults(func=_cmd_descriptions)
 
     index = subparsers.add_parser("index", help="Build a CLIP image index.")
@@ -91,7 +97,11 @@ def _cmd_manifest(args: argparse.Namespace) -> None:
 
 def _cmd_descriptions(args: argparse.Namespace) -> None:
     manifest = pd.read_csv(args.manifest)
-    descriptions = build_proxy_descriptions(manifest, unique_by=args.unique_by)
+    descriptions = build_proxy_descriptions(
+        manifest,
+        unique_by=args.unique_by,
+        required_fields=args.require_fields,
+    )
     _write_csv(descriptions, args.output)
     print(f"Wrote {len(descriptions)} descriptions to {args.output}")
 
