@@ -7,6 +7,9 @@ from typing import Sequence
 import numpy as np
 from PIL import Image
 
+"""
+CLIP Encoder
+"""
 
 @dataclass
 class SentenceTransformerClipEncoder:

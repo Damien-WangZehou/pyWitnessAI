@@ -11,6 +11,9 @@ import pandas as pd
 
 from .clip_backend import SentenceTransformerClipEncoder, l2_normalise
 
+"""
+Image embedding index and text search
+"""
 
 @dataclass
 class ClipIndex:

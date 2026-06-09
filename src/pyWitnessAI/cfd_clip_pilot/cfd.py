@@ -6,6 +6,9 @@ from typing import Iterable
 
 import pandas as pd
 
+"""
+Load CFD Images and Metadata
+"""
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 NEUTRAL_EXPRESSION_CODES = {"N", "NEUTRAL"}

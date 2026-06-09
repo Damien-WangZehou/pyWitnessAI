@@ -9,6 +9,9 @@ import pandas as pd
 from .clip_backend import SentenceTransformerClipEncoder
 from .index import ClipIndex
 
+"""
+Target-rank retrieval evaluation
+"""
 
 def evaluate_retrieval(
     index: ClipIndex,

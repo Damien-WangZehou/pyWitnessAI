@@ -5,6 +5,9 @@ import pandas as pd
 from .clip_backend import SentenceTransformerClipEncoder
 from .index import ClipIndex
 
+"""
+Top-k CLIP filler selection
+"""
 
 def build_filler_sets(
     index: ClipIndex,

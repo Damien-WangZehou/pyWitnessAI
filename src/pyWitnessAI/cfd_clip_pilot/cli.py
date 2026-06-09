@@ -12,6 +12,9 @@ from .evaluate import evaluate_retrieval, write_evaluation_outputs
 from .index import ClipIndex
 from .lineup import build_filler_sets
 
+"""
+PowerShell command entry
+"""
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
