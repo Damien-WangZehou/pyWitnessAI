@@ -129,52 +129,68 @@ class FrameAnalyzerOpenCVIndependent:
         return coordinates
 
 
-class FrameAnalyzerDeepface:
-    def __init__(self, detector_backend='mtcnn'):
+class FrameAnalyzerDeepFace:
+    """
+    Generic DeepFace-backed frame analyzer.
+
+    Parameters
+    ----------
+    detector_backend:
+        Any detector backend accepted by DeepFace.extract_faces, such as
+        "mtcnn", "opencv", "retinaface", "yunet", or "centerface".
+    name:
+        Analyzer name used by Video.frame_analyzer_output. Defaults to the
+        detector backend.
+    include_average_confidence:
+        Include an average_confidence field in the returned legacy dict.
+    """
+
+    def __init__(self, detector_backend='mtcnn', name=None, include_average_confidence=False):
         self.detect_backend = detector_backend
-        self.name = detector_backend
+        self.name = name or detector_backend
+        self.include_average_confidence = include_average_confidence
         self.detected_faces = []
 
     def analyze_frame(self, frame):
         result = _deepface_frame_result(frame, self.detect_backend)
         self.detected_faces = [_detected_faces_payload(frame, result)]
-        return result.to_dict(include_average_confidence=True)
+        return result.to_dict(include_average_confidence=self.include_average_confidence)
 
 
-class FrameAnalyzerMTCNN:
-    def __init__(self, name='mtcnn', detector_backend='mtcnn'):
-        self.detect_backend = detector_backend
-        self.name = name
-        self.detected_faces = []
-
-    def analyze_frame(self, frame):
-        result = _deepface_frame_result(frame, self.detect_backend)
-        self.detected_faces = [_detected_faces_payload(frame, result)]
-        return result.to_dict()
+class FrameAnalyzerDeepface(FrameAnalyzerDeepFace):
+    def __init__(self, detector_backend='mtcnn', name=None, include_average_confidence=True):
+        super().__init__(
+            detector_backend=detector_backend,
+            name=name or detector_backend,
+            include_average_confidence=include_average_confidence,
+        )
 
 
-class FrameAnalyzerOpenCV:
-    def __init__(self, name='opencv', detector_backend='opencv'):
-        self.detect_backend = detector_backend
-        self.name = name
-        self.detected_faces = []
-
-    def analyze_frame(self, frame):
-        result = _deepface_frame_result(frame, self.detect_backend)
-        self.detected_faces = [_detected_faces_payload(frame, result)]
-        return result.to_dict()
+class FrameAnalyzerMTCNN(FrameAnalyzerDeepFace):
+    def __init__(self, name='mtcnn', detector_backend='mtcnn', include_average_confidence=False):
+        super().__init__(
+            detector_backend=detector_backend,
+            name=name,
+            include_average_confidence=include_average_confidence,
+        )
 
 
-class FrameAnalyzerFastMTCNN:
-    def __init__(self, name='fastmtcnn', detector_backend='fastmtcnn'):
-        self.detect_backend = detector_backend
-        self.name = name
-        self.detected_faces = []
+class FrameAnalyzerOpenCV(FrameAnalyzerDeepFace):
+    def __init__(self, name='opencv', detector_backend='opencv', include_average_confidence=False):
+        super().__init__(
+            detector_backend=detector_backend,
+            name=name,
+            include_average_confidence=include_average_confidence,
+        )
 
-    def analyze_frame(self, frame):
-        result = _deepface_frame_result(frame, self.detect_backend)
-        self.detected_faces = [_detected_faces_payload(frame, result)]
-        return result.to_dict()
+
+class FrameAnalyzerFastMTCNN(FrameAnalyzerDeepFace):
+    def __init__(self, name='fastmtcnn', detector_backend='fastmtcnn', include_average_confidence=False):
+        super().__init__(
+            detector_backend=detector_backend,
+            name=name,
+            include_average_confidence=include_average_confidence,
+        )
 
 
 class FrameAnalyzerFaceIdentity:
