@@ -194,6 +194,9 @@ def detections_from_deepface(frame: np.ndarray, faces: Iterable[dict[str, Any]])
 
 
 class FaceIdentityTracker:
+    """
+    Tracks face identities in a video.
+    """
     def __init__(
         self,
         model_name: str = "Facenet512",
