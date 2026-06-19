@@ -1,6 +1,7 @@
 import numpy as np
 
 from pyWitnessAI.VideoAnalysis import FaceDetection, FaceIdentityTracker
+from pyWitnessAI.VideoAI import FrameAnalyzerDeepFace, FrameAnalyzerMTCNN
 from pyWitnessAI.VideoProcessor import FrameProcessorFaceRemover
 
 
@@ -61,3 +62,48 @@ def test_frame_processor_face_remover_keeps_selected_label_from_context():
     assert processed[2, 2].tolist() == [0, 0, 0]
     assert processed[2, 14].tolist() == [128, 128, 128]
 
+
+def test_deepface_analyzer_wraps_backend_and_preserves_legacy_output(monkeypatch):
+    calls = []
+
+    def fake_extract_faces(img_path, detector_backend, enforce_detection):
+        calls.append((detector_backend, enforce_detection))
+        return [
+            {
+                "facial_area": {"x": 1, "y": 2, "w": 4, "h": 5},
+                "confidence": 0.9,
+            }
+        ]
+
+    monkeypatch.setattr("pyWitnessAI.VideoAI.DeepFace.extract_faces", fake_extract_faces)
+    frame = np.zeros((12, 12, 3), dtype=np.uint8)
+
+    analyzer = FrameAnalyzerDeepFace(detector_backend="retinaface", include_average_confidence=True)
+    output = analyzer.analyze_frame(frame)
+
+    assert calls == [("retinaface", False)]
+    assert output["face_count"] == 1
+    assert output["coordinates"] == [[1, 2, 4, 5]]
+    assert output["confidence"] == [0.9]
+    assert output["average_confidence"] == 0.9
+    assert analyzer.detected_faces[0]["coordinates"] == [[1, 2, 4, 5]]
+
+
+def test_mtcnn_wrapper_keeps_original_defaults(monkeypatch):
+    def fake_extract_faces(img_path, detector_backend, enforce_detection):
+        assert detector_backend == "mtcnn"
+        return []
+
+    monkeypatch.setattr("pyWitnessAI.VideoAI.DeepFace.extract_faces", fake_extract_faces)
+
+    analyzer = FrameAnalyzerMTCNN()
+    output = analyzer.analyze_frame(np.zeros((12, 12, 3), dtype=np.uint8))
+
+    assert analyzer.name == "mtcnn"
+    assert analyzer.detect_backend == "mtcnn"
+    assert output == {
+        "face_count": 0,
+        "face_area": 0,
+        "confidence": [],
+        "coordinates": [],
+    }
