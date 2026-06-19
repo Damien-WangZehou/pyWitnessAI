@@ -6,6 +6,36 @@ from mtcnn import MTCNN
 from deepface import DeepFace
 from importlib.resources import files
 
+from .VideoAnalysis import (
+    FaceIdentityTracker,
+    crop_box_xywh,
+    detections_from_deepface,
+    FrameAnalysisResult,
+)
+
+
+def _deepface_frame_result(frame, detector_backend):
+    try:
+        faces = DeepFace.extract_faces(
+            img_path=frame,
+            detector_backend=detector_backend,
+            enforce_detection=False,
+        )
+    except ValueError:
+        return FrameAnalysisResult()
+
+    if not faces:
+        return FrameAnalysisResult()
+
+    return FrameAnalysisResult(detections=detections_from_deepface(frame, faces))
+
+
+def _detected_faces_payload(frame, result):
+    return {
+        "coordinates": [list(face.bbox) for face in result.detections],
+        "images": [crop_box_xywh(frame, face.bbox) for face in result.detections],
+    }
+
 
 
 class FrameAnalyzerMTCNNIndependent:
@@ -77,8 +107,8 @@ class FrameAnalyzerOpenCVIndependent:
         face_count = len(faces)
         face_area = self.get_face_area(faces)
         face_coordinates = self.get_face_coordinates(faces)
-        confidence = 1.0 if faces else 0
-        average_confidence = np.mean(confidence) if confidence else 0
+        confidence = [1.0] * face_count
+        average_confidence = float(np.mean(confidence)) if confidence else 0.0
 
         return {
             f'face_count': face_count,
@@ -106,65 +136,9 @@ class FrameAnalyzerDeepface:
         self.detected_faces = []
 
     def analyze_frame(self, frame):
-        try:
-            faces = DeepFace.extract_faces(frame, detector_backend=self.detect_backend, enforce_detection=False)
-        except ValueError:
-            return {
-                'face_count': 0,
-                'face_area': 0,
-                'confidence': [],
-                'average_confidence': 0,
-                'coordinates': []
-            }
-
-        if not faces or faces is None:
-            return {
-                'face_count': 0,
-                'face_area': 0,
-                'confidence': [],
-                'average_confidence': 0,
-                'coordinates': []
-            }
-
-        valid_faces = []
-        confidences = []
-        coordinates = []
-        face_area_sum = 0
-        frame_height, frame_width = frame.shape[:2]
-
-        for face in faces:
-            x, y, w, h = face['facial_area']['x'], face['facial_area']['y'], \
-                         face['facial_area']['w'], face['facial_area']['h']
-
-            # Ignore faces that cover the entire frame or have zero confidence
-            if (w == frame_width and h == frame_height) or face['confidence'] == 0:
-                continue
-
-            valid_faces.append(face)
-            face_area = w * h
-            face_area_sum += face_area
-            confidence = face['confidence']
-            confidences.append(confidence)
-            coordinates.append([x, y, w, h])
-
-        if not valid_faces:
-            return {
-                'face_count': 0,
-                'face_area': 0,
-                'confidence': [],
-                'average_confidence': 0,
-                'coordinates': []
-            }
-
-        average_confidence = np.mean(confidences) if confidences else 0
-
-        return {
-            'face_count': len(valid_faces),
-            'face_area': face_area_sum,
-            'confidence': confidences,
-            'average_confidence': average_confidence,
-            'coordinates': coordinates
-        }
+        result = _deepface_frame_result(frame, self.detect_backend)
+        self.detected_faces = [_detected_faces_payload(frame, result)]
+        return result.to_dict(include_average_confidence=True)
 
 
 class FrameAnalyzerMTCNN:
@@ -174,59 +148,9 @@ class FrameAnalyzerMTCNN:
         self.detected_faces = []
 
     def analyze_frame(self, frame):
-        try:
-            faces = DeepFace.extract_faces(frame, detector_backend=self.detect_backend, enforce_detection=False)
-        except ValueError:
-            return {
-                'face_count': 0,
-                'face_area': 0,
-                'confidence': [],
-                'coordinates': []
-            }
-
-        if not faces or faces is None:
-            return {
-                'face_count': 0,
-                'face_area': 0,
-                'confidence': [],
-                'coordinates': []
-            }
-
-        valid_faces = []
-        confidences = []
-        coordinates = []
-        face_area_sum = 0
-        frame_height, frame_width = frame.shape[:2]
-
-        for face in faces:
-            x, y, w, h = face['facial_area']['x'], face['facial_area']['y'], \
-                         face['facial_area']['w'], face['facial_area']['h']
-
-            # Ignore faces that cover the entire frame or have zero confidence
-            if (w == frame_width and h == frame_height) or face['confidence'] == 0:
-                continue
-
-            valid_faces.append(face)
-            face_area = w * h
-            face_area_sum += face_area
-            confidence = face['confidence']
-            confidences.append(confidence)
-            coordinates.append([x, y, w, h])
-
-        if not valid_faces:
-            return {
-                'face_count': 0,
-                'face_area': 0,
-                'confidence': [],
-                'coordinates': []
-            }
-
-        return {
-            'face_count': len(valid_faces),
-            'face_area': face_area_sum,
-            'confidence': confidences,
-            'coordinates': coordinates
-        }
+        result = _deepface_frame_result(frame, self.detect_backend)
+        self.detected_faces = [_detected_faces_payload(frame, result)]
+        return result.to_dict()
 
 
 class FrameAnalyzerOpenCV:
@@ -236,59 +160,9 @@ class FrameAnalyzerOpenCV:
         self.detected_faces = []
 
     def analyze_frame(self, frame):
-        try:
-            faces = DeepFace.extract_faces(frame, detector_backend=self.detect_backend, enforce_detection=False)
-        except ValueError:
-            return {
-                'face_count': 0,
-                'face_area': 0,
-                'confidence': [],
-                'coordinates': []
-            }
-
-        if not faces or faces is None:
-            return {
-                'face_count': 0,
-                'face_area': 0,
-                'confidence': [],
-                'coordinates': []
-            }
-
-        valid_faces = []
-        confidences = []
-        coordinates = []
-        face_area_sum = 0
-        frame_height, frame_width = frame.shape[:2]
-
-        for face in faces:
-            x, y, w, h = face['facial_area']['x'], face['facial_area']['y'], \
-                         face['facial_area']['w'], face['facial_area']['h']
-
-            # Ignore faces that cover the entire frame or have zero confidence
-            if (w == frame_width and h == frame_height) or face['confidence'] == 0:
-                continue
-
-            valid_faces.append(face)
-            face_area = w * h
-            face_area_sum += face_area
-            confidence = face['confidence']
-            confidences.append(confidence)
-            coordinates.append([x, y, w, h])
-
-        if not valid_faces:
-            return {
-                'face_count': 0,
-                'face_area': 0,
-                'confidence': [],
-                'coordinates': []
-            }
-
-        return {
-            'face_count': len(valid_faces),
-            'face_area': face_area_sum,
-            'confidence': confidences,
-            'coordinates': coordinates
-        }
+        result = _deepface_frame_result(frame, self.detect_backend)
+        self.detected_faces = [_detected_faces_payload(frame, result)]
+        return result.to_dict()
 
 
 class FrameAnalyzerFastMTCNN:
@@ -298,60 +172,50 @@ class FrameAnalyzerFastMTCNN:
         self.detected_faces = []
 
     def analyze_frame(self, frame):
-        try:
-            faces = DeepFace.extract_faces(frame, detector_backend=self.detect_backend, enforce_detection=False)
-        except ValueError:
-            return {
-                'face_count': 0,
-                'face_area': 0,
-                'confidence': [],
-                'coordinates': []
-            }
+        result = _deepface_frame_result(frame, self.detect_backend)
+        self.detected_faces = [_detected_faces_payload(frame, result)]
+        return result.to_dict()
 
-        if not faces or faces is None:
-            return {
-                'face_count': 0,
-                'face_area': 0,
-                'confidence': [],
-                'coordinates': []
-            }
 
-        valid_faces = []
-        confidences = []
-        coordinates = []
-        face_area_sum = 0
-        frame_height, frame_width = frame.shape[:2]
+class FrameAnalyzerFaceIdentity:
+    def __init__(self, name='identity', detector_backend='mtcnn',
+                 model_name='Facenet512', max_distance=0.90,
+                 label_prefix='face', max_samples_per_label=4,
+                 embedding_function=None, crop_padding=0):
+        self.name = name
+        self.detect_backend = detector_backend
+        self.tracker = FaceIdentityTracker(
+            model_name=model_name,
+            max_distance=max_distance,
+            label_prefix=label_prefix,
+            max_samples_per_label=max_samples_per_label,
+            embedding_function=embedding_function,
+            crop_padding=crop_padding,
+        )
+        self.detected_faces = []
+        self.face_records = self.tracker.records
+        self.face_gallery = self.tracker.gallery
+        self._next_frame_index = 0
 
-        for face in faces:
-            x, y, w, h = face['facial_area']['x'], face['facial_area']['y'], \
-                         face['facial_area']['w'], face['facial_area']['h']
+    def analyze_frame(self, frame, frame_index=None):
+        if frame_index is None:
+            frame_index = self._next_frame_index
+        self._next_frame_index = int(frame_index) + 1
 
-            # Ignore faces that cover the entire frame or have zero confidence
-            if (w == frame_width and h == frame_height) or face['confidence'] == 0:
-                continue
+        result = _deepface_frame_result(frame, self.detect_backend)
+        result.frame_index = int(frame_index)
+        self.tracker.update_frame(
+            frame_index=int(frame_index),
+            frame=frame,
+            detections=result.detections,
+            analyzer=self.name,
+        )
+        self.detected_faces = [_detected_faces_payload(frame, result)]
+        return result.to_dict(include_average_confidence=True)
 
-            valid_faces.append(face)
-            face_area = w * h
-            face_area_sum += face_area
-            confidence = face['confidence']
-            confidences.append(confidence)
-            coordinates.append([x, y, w, h])
-
-        if not valid_faces:
-            return {
-                'face_count': 0,
-                'face_area': 0,
-                'confidence': [],
-                'average_confidence': 0,
-                'coordinates': []
-            }
-
-        return {
-            'face_count': len(valid_faces),
-            'face_area': face_area_sum,
-            'confidence': confidences,
-            'coordinates': coordinates
-        }
+    def reset(self):
+        self.tracker.reset()
+        self._next_frame_index = 0
 
 
 class SimilarityAnalyzer:
