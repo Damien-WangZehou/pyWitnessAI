@@ -550,6 +550,9 @@ class Video:
         return top_frames
 
     def print_probe_frames(self, top_frames):
+        if self.top_frames is None:
+            print("Please run find_probe_frames first.")
+            return
         for i, frame in enumerate(top_frames):
             if len(frame) == 2:
                 _, frame_number = frame
