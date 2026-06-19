@@ -1,12 +1,18 @@
+import inspect
+import os
+import time
+import heapq
+
 import cv2 as cv
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from pyWitnessAI.utils.Constants import legend_colors, get_color_for_analyzer, get_style_for_analyzer
-from pyWitnessAI.utils.DataFlattener import *
-from .ImagesCategorizer import *
-import heapq
 from deepface import DeepFace
-import time
+
+from pyWitnessAI.utils.Constants import legend_colors, get_color_for_analyzer, get_style_for_analyzer
+from pyWitnessAI.utils.DataFlattener import flatten_data, flatten_keys
+from .ImagesCategorizer import *
+from .VideoAnalysis import FaceIdentityTracker, FrameAnalysisResult
 # You should also load the path of cascade, similarity_model, lineup_images before using the analyzer
 
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
@@ -28,6 +34,7 @@ class Video:
         self.frame_analyzer_output = {}
         self.frame_analyzed = 0
         self.frame_total = 0
+        self.face_records = []
 
         self.save_directory = save_directory
         self.top_frames = None  # An attribute to get the best quality frame
@@ -59,8 +66,84 @@ class Video:
         self.frame_height = int(self.cap.get(cv.CAP_PROP_FRAME_HEIGHT))
         self.frame_area = self.frame_width * self.frame_height
 
+    def _reset_run_state(self):
+        # Reset the run state so that the video can be processed again
+        self.frame_count = []
+        self.average_pixel_values = []
+        self.average_value = 0
+        self.frame_analyzed = 0
+        self.face_records = []
+        for analyzer_name in self.frame_analyzer:
+            self.frame_analyzer_output[analyzer_name] = []
+        for analyzer in self.frame_analyzer.values():
+            if hasattr(analyzer, "reset"):
+                analyzer.reset()
+
+    @staticmethod
+    def _accepts_context(callable_obj, parameter_name):
+        try:
+            signature = inspect.signature(callable_obj)
+        except (TypeError, ValueError):
+            return False
+        return (
+            parameter_name in signature.parameters
+            or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
+        )
+
+    def _process_frame_with_context(self, processor, frame, context):
+        method = processor.process_frame
+        if self._accepts_context(method, "context"):
+            return method(frame, context=context)
+        return method(frame)
+
+    def _analyze_frame_with_context(self, analyzer, frame, frame_index):
+        method = analyzer.analyze_frame
+        if self._accepts_context(method, "frame_index"):
+            return method(frame, frame_index=frame_index)
+        return method(frame)
+
+    def _processors_for_stage(self, stage):
+        return [
+            processor
+            for processor in self.frame_processor.values()
+            if getattr(processor, "stage", "pre") == stage
+        ]
+
+    def _append_face_records(self, frame_index, analyzer_name, result):
+        if not isinstance(result, dict) or "coordinates" not in result:
+            return
+        frame_result = FrameAnalysisResult.from_dict(result, frame_index=frame_index)
+        self.face_records.extend(frame_result.to_records(analyzer=analyzer_name))
+
+    def rebuild_face_records(self):
+        self.face_records = []
+        for analyzer_name, results in self.frame_analyzer_output.items():
+            for index, result in enumerate(results):
+                if index < len(self.frame_count):
+                    self._append_face_records(self.frame_count[index], analyzer_name, result)
+        return self.face_records
+
     def process_video(self, frame_start=0, frame_end=1000000000):
         #  Process the video frame between frame_start and frame_end
+        self._reset_run_state()
+        self.cap = cv.VideoCapture(self.video_path)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Cannot open video: {self.video_path}")
+
+        self.frame_total = int(self.cap.get(cv.CAP_PROP_FRAME_COUNT)) or 0
+        self.get_frame_info()
+
+        frame_start = max(0, int(frame_start))
+        if frame_end is None:
+            frame_end = self.frame_total - 1 if self.frame_total else 1000000000
+        frame_end = max(-1, int(frame_end))
+        if self.frame_total:
+            frame_end = min(frame_end, self.frame_total - 1)
+        if frame_start > frame_end >= 0:
+            self.release_resources()
+            return
+
+        self.cap.set(cv.CAP_PROP_POS_FRAMES, frame_start)
         frame_analyzed = 0
 
         # Initialize timing dictionary
@@ -72,26 +155,35 @@ class Video:
             if not ret:
                 break
 
-            if frame_count == frame_start:
-                self.frame_total = self.cap.get(cv.CAP_PROP_FRAME_COUNT)
-                self.get_frame_info()
-
             self.frame_count.append(frame_count)
             average_pixel_value = int(frame.mean())
             self.average_pixel_values.append(average_pixel_value)
 
-            for k in self.frame_processor:
-                frame = self.frame_processor[k].process_frame(frame)
+            context = {
+                "frame": frame_count,
+                "frame_index": frame_count,
+                "video": self,
+                "analysis": {},
+            }
+
+            for processor in self._processors_for_stage("pre"):
+                frame = self._process_frame_with_context(processor, frame, context)
 
             for analyzer_name, analyzer in self.frame_analyzer.items():
                 start_time = time.time()  # Record start time
-                self.frame_analyzer_output[analyzer_name].append(analyzer.analyze_frame(frame))
+                result = self._analyze_frame_with_context(analyzer, frame, frame_count)
+                self.frame_analyzer_output[analyzer_name].append(result)
+                context["analysis"][analyzer_name] = result
+                self._append_face_records(frame_count, analyzer_name, result)
                 end_time = time.time()  # Record end time
                 analyzer_timings[analyzer_name] += end_time - start_time  # Accumulate time
 
+            for processor in self._processors_for_stage("post"):
+                frame = self._process_frame_with_context(processor, frame, context)
+
             frame_analyzed += 1
 
-        self.average_value = np.mean(self.average_pixel_values)
+        self.average_value = float(np.mean(self.average_pixel_values)) if self.average_pixel_values else 0
         self.frame_analyzed = frame_analyzed
         self.release_resources()
         cv.destroyAllWindows()
@@ -130,7 +222,11 @@ class Video:
         if len(outputs) != len(self.frame_count):
             raise RuntimeError("Analyzer output length mismatch with frame_count. Did you run process_video()?")
 
-        self.face_gallery.clear()
+        tracker = FaceIdentityTracker(
+            model_name=model_name,
+            max_distance=max_distance,
+            max_samples_per_label=max_samples_per_label,
+        )
         self.face_labels_by_frame = [[] for _ in self.frame_count]
         self._gallery_built_from = detector
         self._gallery_model_name = model_name
@@ -140,68 +236,35 @@ class Video:
         if not cap2.isOpened():
             raise RuntimeError(f"Cannot reopen video: {self.video_path}")
 
-        current_frame_idx = -1
-        label_count = 0
-
-        while True:
+        for output_index, frame_number in enumerate(self.frame_count):
+            cap2.set(cv.CAP_PROP_POS_FRAMES, int(frame_number))
             ret, frame = cap2.read()
             if not ret:
                 break
-            current_frame_idx += 1
-            if current_frame_idx >= len(outputs):
-                break
 
-            coords = outputs[current_frame_idx].get('coordinates', [])
-            if not coords:
-                self.face_labels_by_frame[current_frame_idx] = []
+            frame_result = FrameAnalysisResult.from_dict(
+                outputs[output_index],
+                frame_index=int(frame_number),
+            )
+            if not frame_result.detections:
+                self.face_labels_by_frame[output_index] = []
                 continue
 
-            per_frame_labels = []
-            for box in coords:
-                face_img = self._crop_face_from_frame(frame, box)
-                try:
-                    emb = self._represent_face(face_img, model_name=model_name)
-                except Exception:
-                    # embedding failed, skip this face
-                    per_frame_labels.append(None)
-                    continue
-
-                # Find the closest existing label
-                best_label = None
-                best_dist = float('inf')
-                for lbl, info in self.face_gallery.items():
-                    centroid = info['rep']
-                    dist = self._euclidean_distance(emb, centroid)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_label = lbl
-
-                # Make decision based on distance
-                if best_dist <= max_distance and best_label is not None:
-                    info = self.face_gallery[best_label]
-                    # Update centroid and samples
-                    new_centroid = self._update_centroid(info['rep'], emb, len(info['samples']))
-                    info['rep'] = new_centroid
-                    info['samples'].append((current_frame_idx, tuple(map(int, box))))
-                    # Add thumbnail if under limit
-                    if len(info['thumb']) < max_samples_per_label:
-                        thumb = cv.resize(face_img, (112, 112))
-                        info['thumb'].append(thumb)
-                    per_frame_labels.append(best_label)
-                else:
-                    # Create new label
-                    label_count += 1
-                    new_label = f"face{label_count}"
-                    self.face_gallery[new_label] = {
-                        "rep": emb,
-                        "samples": [(current_frame_idx, tuple(map(int, box)))],
-                        "thumb": [cv.resize(face_img, (112, 112))]
-                    }
-                    per_frame_labels.append(new_label)
-
-            self.face_labels_by_frame[current_frame_idx] = per_frame_labels
+            labels = tracker.update_frame(
+                frame_index=int(frame_number),
+                frame=frame,
+                detections=frame_result.detections,
+                analyzer=f"{detector}_identity",
+            )
+            self.face_labels_by_frame[output_index] = labels
+            updated = frame_result.to_dict(
+                include_average_confidence='average_confidence' in outputs[output_index]
+            )
+            outputs[output_index].update(updated)
 
         cap2.release()
+        self.face_gallery = tracker.gallery
+        self.rebuild_face_records()
 
         # Optionally save the face gallery
         if save_dir:
@@ -275,17 +338,21 @@ class Video:
             data = outputs[i]
             coords = data.get('coordinates', [])
             confs = data.get('confidence', [])
+            distances = data.get('embedding_distance', [])
 
             labels_this_frame = self.face_labels_by_frame[i] if i < len(self.face_labels_by_frame) else []
             if not coords or not labels_this_frame:
-                # 该帧无脸，或未标注
-                outputs[i] = {
+                empty_data = {
                     'face_count': 0,
                     'face_area': 0,
                     'confidence': [],
-                    'average_confidence': 0 if 'average_confidence' in data else [],
-                    'coordinates': []
+                    'coordinates': [],
+                    'labels': [],
+                    'embedding_distance': [],
                 }
+                if 'average_confidence' in data:
+                    empty_data['average_confidence'] = 0
+                outputs[i] = empty_data
                 continue
 
             # The boolean mask to decide which faces to keep
@@ -303,6 +370,8 @@ class Video:
             # Filter coordinates and confidences
             new_coords = [c for c, k in zip(coords, keep_mask) if k]
             new_confs = [c for c, k in zip(confs, keep_mask) if k]
+            new_labels = [c for c, k in zip(labels_this_frame, keep_mask) if k]
+            new_distances = [c for c, k in zip(distances, keep_mask) if k]
 
             # Calculate new face area and average confidence
             new_face_area = sum(int(b[2]) * int(b[3]) for b in new_coords) if new_coords else 0
@@ -313,6 +382,8 @@ class Video:
                     'face_area': new_face_area,
                     'coordinates': new_coords,
                     'confidence': new_confs,
+                    'labels': new_labels,
+                    'embedding_distance': new_distances,
                     'average_confidence': avg_conf
                 }
             else:
@@ -320,11 +391,33 @@ class Video:
                     'face_count': len(new_coords),
                     'face_area': new_face_area,
                     'coordinates': new_coords,
-                    'confidence': new_confs
+                    'confidence': new_confs,
+                    'labels': new_labels,
+                    'embedding_distance': new_distances
                 }
             outputs[i] = new_data
 
+        self.rebuild_face_records()
         print(f"Filtering done on detector '{detector}'.")
+
+    def get_face_table(self, labeled_only=False):
+        """
+        Return one row per detected face across analyzed frames.
+        """
+        if not self.face_records:
+            self.rebuild_face_records()
+        df = pd.DataFrame(self.face_records)
+        if labeled_only and not df.empty and 'label' in df.columns:
+            df = df[df['label'].notna()].reset_index(drop=True)
+        return df
+
+    def save_face_table(self, directory='results', prefix='faces', labeled_only=False):
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+        df = self.get_face_table(labeled_only=labeled_only)
+        path = os.path.join(directory, f'{prefix}_data.csv')
+        df.to_csv(path, index=False)
+        return path
 
     def show_gallery_contact_sheet(self, save_path=None, cols=8, thumb_size=(112, 112), show_window=False, window_name='Face Gallery'):
         """
@@ -655,6 +748,8 @@ class Video:
         }
 
         for analyzer_name, results_list in self.frame_analyzer_output.items():
+            if not results_list:
+                continue
             # if all entries are dictionaries
             if all(isinstance(entry, dict) for entry in results_list):
                 for key in results_list[0].keys():
@@ -744,7 +839,7 @@ class Video:
         return np.linalg.norm(a - b)
 
     def _represent_face(self, face_img_bgr, model_name='Facenet'):
-        # DeepFace 期望 RGB
+        # DeepFace expects RGB input.
         face_rgb = cv.cvtColor(face_img_bgr, cv.COLOR_BGR2RGB)
         reps = DeepFace.represent(face_rgb, model_name=model_name, enforce_detection=False)
         emb = np.array(reps[0]['embedding'], dtype=np.float32)
