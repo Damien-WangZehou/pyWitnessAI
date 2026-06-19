@@ -42,6 +42,7 @@ _STAR_EXPORTS = {
     "ImagesAI",
     "Video",
     "VideoAI",
+    "VideoAnalysis",
     "VideoProcessor",
     "Lineup",
     "LineupDecider",
