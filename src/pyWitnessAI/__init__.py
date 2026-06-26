@@ -26,6 +26,7 @@ _EXPORT_MODULES = (
     "LineupDecider",
     "VideoLineupPipeline",
 )
+_OPTIONAL_EXPORT_MODULES = set(_EXPORT_MODULES) - {"utils.Constants"}
 _STAR_EXPORTS = {
     "Images",
     "ImagesAI",
@@ -47,6 +48,11 @@ def _export_public_names(module_path: str) -> None:
     except ModuleNotFoundError as exc:
         if exc.name in _OPTIONAL_DEPENDENCIES:
             _missing_optional_imports[module_path] = exc.name or "unknown"
+            return
+        raise
+    except Exception as exc:
+        if module_path in _OPTIONAL_EXPORT_MODULES:
+            _missing_optional_imports[module_path] = f"{type(exc).__name__}: {exc}"
             return
         raise
 
