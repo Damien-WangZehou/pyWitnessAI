@@ -40,6 +40,11 @@ cfd-pilot = [
     "tqdm",
     "openpyxl",
 ]
+generation = [
+    "openai>=1.0",
+    "Pillow",
+    "matplotlib",
+]
 
 colloff_replication = [
     "deepface==0.0.79",
