@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from importlib import import_module
+import os
 
 
 _OPTIONAL_DEPENDENCIES = {
@@ -25,8 +26,17 @@ _EXPORT_MODULES = (
     "Lineup",
     "LineupDecider",
     "VideoLineupPipeline",
+    "FillerGenerator",
+    "GeneratedFaceDataset",
+    "FillerSelectionBenchmark",
 )
 _OPTIONAL_EXPORT_MODULES = set(_EXPORT_MODULES) - {"utils.Constants"}
+_EAGER_EXPORT_MODULES = (
+    "utils.Constants",
+    "FillerGenerator",
+    "GeneratedFaceDataset",
+    "FillerSelectionBenchmark",
+)
 _STAR_EXPORTS = {
     "Images",
     "ImagesAI",
@@ -36,6 +46,22 @@ _STAR_EXPORTS = {
     "Lineup",
     "LineupDecider",
     "VideoLineupPipeline",
+    "FaceDescriptionSchema",
+    "FillerGenerator",
+    "FillerSelectionBenchmark",
+    "FillerSelectorBenchmark",
+    "GeneratedFiller",
+    "GeneratedFaceDataset",
+    "DEFAULT_GENERATED_FACE_DATASET_ROOT",
+    "DatasetMatchMode",
+    "SCHEMA_COLUMNS",
+    "ImageGenerationBackend",
+    "ImageGenerationRequest",
+    "OpenAIImageBackend",
+    "available_image_generation_models",
+    "available_image_generation_providers",
+    "register_image_generation_backend",
+    "BenchmarkStage",
 }
 
 __all__: list[str] = []
@@ -67,8 +93,15 @@ def _export_public_names(module_path: str) -> None:
             __all__.append(name)
 
 
-for _module_path in _EXPORT_MODULES:
+_modules_to_export = (
+    _EXPORT_MODULES
+    if os.environ.get("PYWITNESSAI_EAGER_OPTIONAL_EXPORTS") == "1"
+    else _EAGER_EXPORT_MODULES
+)
+
+for _module_path in _modules_to_export:
     _export_public_names(_module_path)
 
 
 del _module_path
+del _modules_to_export
