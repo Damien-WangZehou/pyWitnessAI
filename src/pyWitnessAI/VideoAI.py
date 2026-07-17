@@ -496,7 +496,7 @@ class LineupLoader:
                         self.lineup_images.append(processed_image)
             return self.lineup_images
 
-    def compare_faces(self, target_faces, filler_faces, detector='opencv', model_name='Facenet512', calculate_method='euclidean'):
+    def compare_faces(self, target_faces, filler_faces, detector='opencv', model_name='Facenet', calculate_method='euclidean'):
         #  Use pre-detected faces for analysis
         frame_results = []
         model_name = model_name
@@ -527,12 +527,7 @@ class LineupLoader:
         return np.array(embedding)
 
     def calculate_similarity_euclidean(self, emb1, emb2):
-        # Apply L2 normalization to both embeddings
-        emb1_normalized = emb1 / np.linalg.norm(emb1)
-        emb2_normalized = emb2 / np.linalg.norm(emb2)
-
-        # Compute the Euclidean distance between normalized embeddings
-        return np.linalg.norm(emb1_normalized - emb2_normalized)
+        return np.linalg.norm(emb1 - emb2)
 
     def save(self, data, directory='results', label='', column_name=None):
         if not os.path.exists(directory):
