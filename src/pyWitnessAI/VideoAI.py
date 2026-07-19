@@ -2,8 +2,6 @@ import os
 import pandas as pd
 import cv2 as cv
 import numpy as np
-from mtcnn import MTCNN
-from deepface import DeepFace
 from importlib.resources import files
 
 from .VideoAnalysis import (
@@ -12,6 +10,25 @@ from .VideoAnalysis import (
     detections_from_deepface,
     FrameAnalysisResult,
 )
+
+
+class _LazyDeepFace:
+    """Delay TensorFlow/DeepFace startup until an AI operation is requested."""
+
+    @staticmethod
+    def extract_faces(*args, **kwargs):
+        from deepface import DeepFace as deepface
+        return deepface.extract_faces(*args, **kwargs)
+
+    @staticmethod
+    def represent(*args, **kwargs):
+        from deepface import DeepFace as deepface
+        return deepface.represent(*args, **kwargs)
+
+
+# Kept as a module attribute so existing monkeypatching and integrations continue
+# to work without importing TensorFlow merely to use non-AI video utilities.
+DeepFace = _LazyDeepFace
 
 
 def _deepface_frame_result(frame, detector_backend):
@@ -34,12 +51,17 @@ def _detected_faces_payload(frame, result):
     return {
         "coordinates": [list(face.bbox) for face in result.detections],
         "images": [crop_box_xywh(frame, face.bbox) for face in result.detections],
+        "labels": [face.label for face in result.detections],
+        "confidence": [face.confidence for face in result.detections],
+        "embedding_distance": [face.embedding_distance for face in result.detections],
     }
 
 
 
 class FrameAnalyzerMTCNNIndependent:
     def __init__(self, name="mtcnn_old"):
+        from mtcnn import MTCNN
+
         self.detector = MTCNN()
         self.name = name
         #  Store detected faces as well as coordinates for transfer
