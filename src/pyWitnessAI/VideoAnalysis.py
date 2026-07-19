@@ -79,6 +79,11 @@ class FaceDetection:
     def area(self) -> int:
         return int(self.bbox[2]) * int(self.bbox[3])
 
+    def quality_score(self, frame_area: int | None = None) -> float:
+        """Return a resolution-independent confidence/size quality score."""
+        area = self.area / frame_area if frame_area else self.area
+        return max(0.0, float(self.confidence)) * float(area)
+
     def to_record(self, frame_index: int | None, face_index: int, analyzer: str | None = None) -> dict[str, Any]:
         x, y, w, h = self.bbox
         record = {
@@ -164,6 +169,42 @@ class FrameAnalysisResult:
         return cls(frame_index=frame_index, detections=detections)
 
 
+@dataclass(frozen=True)
+class ProbeFrame:
+    """A ranked face crop candidate from one video frame."""
+
+    frame_index: int
+    face_index: int
+    bbox: BoxXYWH
+    confidence: float
+    area: int
+    area_ratio: float
+    quality_score: float
+    label: str | None = None
+    analyzer: str | None = None
+    rank: int | None = None
+    appearance_frame_count: int | None = None
+
+    def to_record(self) -> dict[str, Any]:
+        x, y, w, h = self.bbox
+        return {
+            "label": self.label,
+            "rank": self.rank,
+            "frame": self.frame_index,
+            "face_index": self.face_index,
+            "bbox_x": x,
+            "bbox_y": y,
+            "bbox_w": w,
+            "bbox_h": h,
+            "confidence": self.confidence,
+            "area": self.area,
+            "area_ratio": self.area_ratio,
+            "quality_score": self.quality_score,
+            "appearance_frame_count": self.appearance_frame_count,
+            "analyzer": self.analyzer,
+        }
+
+
 def detections_from_deepface(frame: np.ndarray, faces: Iterable[dict[str, Any]]) -> list[FaceDetection]:
     detections: list[FaceDetection] = []
     frame_h, frame_w = frame.shape[:2]
@@ -228,24 +269,54 @@ class FaceIdentityTracker:
         detections: list[FaceDetection],
         analyzer: str | None = None,
     ) -> list[str | None]:
-        labels: list[str | None] = []
-        used_labels: set[str] = set()
+        labels: list[str | None] = [None] * len(detections)
+        face_images: list[np.ndarray | None] = [None] * len(detections)
+        embeddings: list[np.ndarray | None] = [None] * len(detections)
 
+        # Embed the complete frame first.  Matching all faces together avoids
+        # assigning one gallery identity twice and is independent of detector order.
         for face_index, detection in enumerate(detections):
             face_img = crop_box_xywh(frame, detection.bbox, padding=self.crop_padding)
+            face_images[face_index] = face_img
             try:
-                embedding = self._embedding(face_img)
-            except Exception:
+                embeddings[face_index] = self._embedding(face_img)
+            except Exception as exc:
                 detection.label = None
-                labels.append(None)
-                continue
+                detection.metadata["embedding_error"] = str(exc)
 
-            label, distance = self._match_or_create(embedding, used_labels)
+        assignments: dict[int, tuple[str, float]] = {}
+        candidate_matches: list[tuple[float, int, str]] = []
+        for face_index, embedding in enumerate(embeddings):
+            if embedding is None:
+                continue
+            for label, info in self.gallery.items():
+                distance = float(np.linalg.norm(embedding - info["rep"]))
+                if distance <= self.max_distance:
+                    candidate_matches.append((distance, face_index, label))
+
+        used_faces: set[int] = set()
+        used_labels: set[str] = set()
+        for distance, face_index, label in sorted(candidate_matches):
+            if face_index in used_faces or label in used_labels:
+                continue
+            assignments[face_index] = (label, distance)
+            used_faces.add(face_index)
             used_labels.add(label)
+
+        for face_index, (detection, embedding, face_img) in enumerate(
+            zip(detections, embeddings, face_images)
+        ):
+            if embedding is None or face_img is None:
+                continue
+            if face_index in assignments:
+                label, distance = assignments[face_index]
+            else:
+                label = self._create_identity(embedding)
+                distance = None
             detection.label = label
             detection.embedding_distance = distance
-            self._store_sample(label, embedding, frame_index, face_index, detection.bbox, face_img)
-            labels.append(label)
+            self._store_sample(label, embedding, frame_index, face_index, detection, face_img, frame.shape)
+            labels[face_index] = label
 
         result = FrameAnalysisResult(frame_index=frame_index, detections=detections)
         self.records.extend(result.to_records(analyzer=analyzer))
@@ -280,15 +351,21 @@ class FaceIdentityTracker:
         if best_label is not None and best_distance <= self.max_distance:
             return best_label, best_distance
 
+        return self._create_identity(embedding), None
+
+    def _create_identity(self, embedding: np.ndarray) -> str:
         label = f"{self.label_prefix}{self._next_label_id}"
         self._next_label_id += 1
         self.gallery[label] = {
             "rep": embedding,
             "samples": [],
+            "best_samples": [],
             "thumb": [],
             "count": 0,
+            "first_seen_frame": None,
+            "last_seen_frame": None,
         }
-        return label, None
+        return label
 
     def _store_sample(
         self,
@@ -296,16 +373,46 @@ class FaceIdentityTracker:
         embedding: np.ndarray,
         frame_index: int,
         face_index: int,
-        bbox: BoxXYWH,
+        detection: FaceDetection,
         face_img: np.ndarray,
+        frame_shape: tuple[int, ...],
     ) -> None:
         info = self.gallery[label]
         count = int(info.get("count", 0))
         info["rep"] = l2_normalize((info["rep"] * count + embedding) / (count + 1))
         info["count"] = count + 1
-        info["samples"].append((frame_index, tuple(map(int, bbox)), face_index))
+        info["first_seen_frame"] = (
+            frame_index if info.get("first_seen_frame") is None
+            else min(int(info["first_seen_frame"]), frame_index)
+        )
+        info["last_seen_frame"] = (
+            frame_index if info.get("last_seen_frame") is None
+            else max(int(info["last_seen_frame"]), frame_index)
+        )
+        info["samples"].append((frame_index, tuple(map(int, detection.bbox)), face_index))
 
-        thumbs = info.setdefault("thumb", [])
-        if len(thumbs) < self.max_samples_per_label and face_img.size:
-            thumbs.append(cv.resize(face_img, (112, 112)))
+        if not face_img.size or self.max_samples_per_label <= 0:
+            return
+
+        frame_area = int(frame_shape[0]) * int(frame_shape[1])
+        sample = {
+            "frame": int(frame_index),
+            "face_index": int(face_index),
+            "bbox": tuple(map(int, detection.bbox)),
+            "confidence": float(detection.confidence),
+            "area": int(detection.area),
+            "area_ratio": float(detection.area / frame_area) if frame_area else 0.0,
+            "quality_score": detection.quality_score(frame_area),
+            "image": face_img.copy(),
+        }
+        best_samples = info.setdefault("best_samples", [])
+        best_samples.append(sample)
+        best_samples.sort(
+            key=lambda item: (
+                item["quality_score"], item["confidence"], item["area"], -item["frame"]
+            ),
+            reverse=True,
+        )
+        del best_samples[self.max_samples_per_label:]
+        info["thumb"] = [cv.resize(item["image"], (112, 112)) for item in best_samples]
 
