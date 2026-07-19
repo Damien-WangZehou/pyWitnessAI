@@ -22,6 +22,7 @@ _EXPORT_MODULES = (
     "ImagesAI",
     "Video",
     "VideoAI",
+    "VideoAnalysis",
     "VideoProcessor",
     "Lineup",
     "LineupDecider",
@@ -33,6 +34,12 @@ _EXPORT_MODULES = (
 _OPTIONAL_EXPORT_MODULES = set(_EXPORT_MODULES) - {"utils.Constants"}
 _EAGER_EXPORT_MODULES = (
     "utils.Constants",
+    "Images",
+    "VideoAnalysis",
+    "Video",
+    "VideoAI",
+    "VideoProcessor",
+    "VideoLineupPipeline",
     "FillerGenerator",
     "GeneratedFaceDataset",
     "FillerSelectionBenchmark",
