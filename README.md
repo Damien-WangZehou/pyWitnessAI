@@ -261,7 +261,12 @@ df_tp = pipe_tp.run(output_csv="result_tp.csv", export_pywitness=True)
 
 > A simpler pipeline to process crime videos that contain faces.
 
-**Modules covered:**  `VideoAnalyzer`
+**Modules covered:** `Video`, `VideoAI`, `VideoAnalysis`, `VideoProcessor`
+
+The video workflow can build a numbered Mugbook, keep selected identities while
+masking other faces, plot face-quality continuity, and export the top-k probe
+faces per identity. See [the video analysis guide](docs/VideoAnalysis.md) for the
+end-to-end API.
 
 
 ---
