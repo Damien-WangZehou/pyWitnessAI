@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow warnings
 
@@ -5,11 +7,23 @@ import io
 from contextlib import redirect_stdout, redirect_stderr
 import numpy as np
 import pandas as pd
-from deepface import DeepFace
-from facenet_pytorch import MTCNN, InceptionResnetV1
-import torch
 from PIL import Image
 from .Images import Images
+
+
+class _LazyDeepFace:
+    @staticmethod
+    def represent(*args, **kwargs):
+        from deepface import DeepFace as deepface
+        return deepface.represent(*args, **kwargs)
+
+    @staticmethod
+    def verify(*args, **kwargs):
+        from deepface import DeepFace as deepface
+        return deepface.verify(*args, **kwargs)
+
+
+DeepFace = _LazyDeepFace
 
 class ImagesAI:
     def __init__(
@@ -40,11 +54,11 @@ class ImagesAI:
         self.method_used: str | None = None
 
         # Torch device
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
 
-        # FaceNet stack
-        self.mtcnn = MTCNN(device=self.device)
-        self.resnet = InceptionResnetV1(pretrained='vggface2').eval().to(self.device)
+        # FaceNet stack is loaded only if the Georgia pipeline is requested.
+        self.mtcnn = None
+        self.resnet = None
 
     # ---------- utils ----------
     def _progress(self, iterable, desc: str):
@@ -73,11 +87,20 @@ class ImagesAI:
             raise ValueError("DeepFace.represent returned no embeddings.")
         return np.asarray(reps[0]['embedding'], dtype=np.float32)
 
-    def get_embedding_facenet(self, img: Image.Image) -> torch.Tensor | None:
+    def get_embedding_facenet(self, img: Image.Image):
         """
         MTCNN detect+align -> InceptionResnetV1 embedding.
         Returns 1xD torch tensor on CPU for consistent downstream math.
         """
+        import torch
+
+        if self.device is None:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if self.mtcnn is None or self.resnet is None:
+            from facenet_pytorch import MTCNN, InceptionResnetV1
+            self.mtcnn = MTCNN(device=self.device)
+            self.resnet = InceptionResnetV1(pretrained='vggface2').eval().to(self.device)
+
         with torch.no_grad():
             face = self.mtcnn(img)
             if face is None:
@@ -87,7 +110,7 @@ class ImagesAI:
 
     # ---------- distances ----------
     def _to_numpy(self, x):
-        if isinstance(x, torch.Tensor):
+        if hasattr(x, "detach") and hasattr(x, "cpu"):
             x = x.detach().cpu().numpy()
         return x
 
