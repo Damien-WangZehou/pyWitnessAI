@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from pyWitnessAI.cfd_clip_pilot.cfd import (
     expression_from_image_stem,
@@ -135,3 +136,57 @@ def test_build_filler_sets_excludes_query_target():
 
     assert "target-a" not in set(fillers["filler_target_id"])
     assert fillers["filler_position"].tolist() == [1, 2]
+
+
+def test_clip_index_search_validates_top_k():
+    with pytest.raises(ValueError, match="top_k must be >= 1"):
+        _dummy_index().search_vectors(np.asarray([[1.0, 0.0, 0.0]]), top_k=0)
+
+
+def test_clip_index_search_preserves_metadata_and_stable_ties():
+    index = _dummy_index()
+    index.manifest["group"] = ["first", "second", "third"]
+
+    results = index.search_vectors(
+        np.asarray([[1.0, 1.0, 0.0]], dtype=np.float32),
+        top_k=2,
+    )
+
+    assert results["image_id"].tolist() == ["img-a", "img-b"]
+    assert results["group"].tolist() == ["first", "second"]
+    assert results.columns[:7].tolist() == [
+        "query_index",
+        "rank",
+        "image_index",
+        "image_id",
+        "target_id",
+        "image_path",
+        "clip_score",
+    ]
+
+
+def test_clip_index_rejects_missing_ids():
+    manifest = _dummy_index().manifest.copy()
+    manifest.loc[0, "image_id"] = pd.NA
+
+    with pytest.raises(ValueError, match="image_id values must not be empty"):
+        ClipIndex(np.eye(3, dtype=np.float32), manifest)
+
+
+def test_clip_index_float64_build_round_trips_cache(tmp_path):
+    class Float64ImageEncoder:
+        model_name = "float64-test"
+
+        def encode_images(self, image_paths, batch_size=32, show_progress=False):
+            return np.asarray([[3.0, 0.0], [0.0, 4.0]], dtype=np.float64)
+
+    manifest = _dummy_index().manifest.head(2)
+    index = ClipIndex.build(manifest, encoder=Float64ImageEncoder())
+    index.save(tmp_path / "index")
+    loaded = ClipIndex.load(tmp_path / "index")
+
+    assert loaded.image_embeddings.dtype == np.float32
+    np.testing.assert_allclose(
+        loaded.image_embeddings,
+        np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+    )

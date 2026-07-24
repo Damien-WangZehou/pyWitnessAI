@@ -3,6 +3,8 @@ import csv
 import re
 
 from pyWitnessAI import (
+    DEFAULT_FACE_ATTRIBUTE_SCHEMA,
+    FaceAttributeDefinition,
     FillerGenerator,
     ImageGenerationBackend,
     ImageGenerationRequest,
@@ -70,6 +72,42 @@ def test_filler_generator_uses_age_in_subject_phrase(tmp_path: Path):
     assert generator.schema.age == "middle-aged adult"
     assert "middle-aged adult White male person" in prompt
     assert "with middle-aged adult" not in prompt
+
+
+def test_filler_generator_preserves_compound_eyebrow_and_hawk_nose_attributes(tmp_path: Path):
+    generator = FillerGenerator(
+        "a male with long curly hair, brown bushy eyebrows, and an aquiline nose",
+        1,
+        tmp_path,
+    )
+
+    assert generator.schema.hair == "long hair"
+    assert generator.schema.hair_texture == "curly hair"
+    assert generator.schema.eyebrow_color == "brown eyebrows"
+    assert generator.schema.eyebrows == "bushy eyebrows"
+    assert generator.schema.nose == "hawk nose"
+    assert "long curly hair" in generator.generation_prompts()[0]
+    assert "brown bushy eyebrows, hawk nose" in generator.generation_prompts()[0]
+
+
+def test_filler_generator_accepts_extended_attribute_schema(tmp_path: Path):
+    schema = DEFAULT_FACE_ATTRIBUTE_SCHEMA.extend(
+        FaceAttributeDefinition(
+            "skin_marking",
+            65,
+            patterns=((r"\bfreckled skin\b", "freckled skin"),),
+            contrasts={"freckled skin": "unfreckled skin"},
+        )
+    )
+    generator = FillerGenerator(
+        "a male with freckled skin",
+        1,
+        tmp_path,
+        attribute_schema=schema,
+    )
+
+    assert generator.schema.attribute_values()["skin_marking"] == "freckled skin"
+    assert "freckled skin" in generator.generation_prompts()[0]
 
 
 def test_filler_generator_dry_run_does_not_write_images(tmp_path: Path):

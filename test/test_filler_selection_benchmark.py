@@ -4,7 +4,15 @@ import re
 import pandas as pd
 from PIL import Image
 
-from pyWitnessAI import FillerSelectionBenchmark, ImageGenerationBackend, ImageGenerationRequest
+from pyWitnessAI import (
+    DEFAULT_FACE_ATTRIBUTE_SCHEMA,
+    FaceAttributeDefinition,
+    FillerSelectionBenchmark,
+    ImageGenerationBackend,
+    ImageGenerationRequest,
+    SelectorBackend,
+    SelectorQuery,
+)
 
 
 class _TinyBenchmarkBackend(ImageGenerationBackend):
@@ -17,6 +25,16 @@ class _TinyBenchmarkBackend(ImageGenerationBackend):
     def generate(self, request: ImageGenerationRequest) -> None:
         self.requests.append(request)
         request.output_path.write_bytes(b"benchmark-image")
+
+
+class _PerfectSelectorBackend(SelectorBackend):
+    name = "perfect-test"
+    model_name = "perfect-v1"
+
+    def score(self, manifest: pd.DataFrame, query: SelectorQuery) -> pd.DataFrame:
+        return manifest[["image_id"]].assign(
+            selector_score=manifest["is_positive"].map({True: 1.0, False: -1.0})
+        )
 
 
 def _write_dummy_images(folder: Path, count: int) -> None:
@@ -61,6 +79,42 @@ def test_benchmark_includes_age_after_gender(tmp_path: Path):
     assert benchmark.stages[1].positive_label == "young adult"
     assert benchmark.stages[1].negative_label == "older adult"
     assert "young adult male person" in benchmark.stages[1].query
+
+
+def test_benchmark_uses_extended_schema_for_custom_stage(tmp_path: Path):
+    schema = DEFAULT_FACE_ATTRIBUTE_SCHEMA.extend(
+        FaceAttributeDefinition(
+            "skin_marking",
+            65,
+            patterns=((r"\bfreckled skin\b", "freckled skin"),),
+            contrasts={"freckled skin": "unfreckled skin"},
+        )
+    )
+    benchmark = FillerSelectionBenchmark(
+        "a male with freckled skin and a hawk nose",
+        n=1,
+        mode="ladder",
+        dataset_root=tmp_path / "dataset",
+        results_root=tmp_path / "results",
+        generate_missing=False,
+        attribute_schema=schema,
+    )
+
+    stages = {stage.feature: stage for stage in benchmark.stages}
+    assert stages["skin_marking"].positive_label == "freckled skin"
+    assert stages["skin_marking"].negative_label == "unfreckled skin"
+    assert stages["nose"].positive_label == "hawk nose"
+    assert stages["nose"].negative_label == "straight nose"
+
+    image_path = tmp_path / "freckled.png"
+    Image.new("RGB", (8, 8), color=(80, 100, 120)).save(image_path)
+    benchmark.dataset.import_images(
+        [image_path],
+        schema=stages["skin_marking"].positive_schema,
+        verbal_description=stages["skin_marking"].query,
+    )
+    manifest = benchmark.dataset.load_manifest()
+    assert manifest.loc[0, "attribute__skin_marking"] == "freckled skin"
 
 
 def test_benchmark_stage_plan_reports_manifest_coverage(tmp_path: Path):
@@ -191,3 +245,49 @@ def test_benchmark_generates_missing_images_with_custom_backend(tmp_path: Path):
     assert all(re.match(r"gf_\d{8}_\d{6}_[0-9a-f]{8}_000[1]\.png", name) for name in manifest["image_name"])
     assert (tmp_path / "dataset" / "images").exists()
     assert (tmp_path / "dataset" / "batches").exists()
+
+
+def test_benchmark_accepts_shared_selector_backend(tmp_path: Path):
+    benchmark = FillerSelectionBenchmark(
+        "a male person",
+        n=1,
+        mode="single",
+        dataset_root=tmp_path / "dataset",
+        results_root=tmp_path / "results",
+        selector=_PerfectSelectorBackend(),
+        generate_missing=False,
+    )
+    stage = benchmark.stages[0]
+    _write_dummy_images(stage.stage_dir / "male", 1)
+    _write_dummy_images(stage.stage_dir / "female", 1)
+
+    results = benchmark.run(display=False)
+
+    assert results.iloc[0]["is_positive"]
+    assert set(results["selector_backend"]) == {"perfect-test"}
+    assert set(results["selector_model"]) == {"perfect-v1"}
+    assert "selector_model: perfect-v1" in benchmark.summary_text()
+
+
+def test_benchmark_adapts_rank_only_legacy_selector(tmp_path: Path):
+    def rank_only_selector(manifest, query, top_k):
+        output = manifest.sort_values("is_positive", ascending=False).head(top_k)[["image_id"]]
+        return output.assign(rank=range(1, len(output) + 1))
+
+    benchmark = FillerSelectionBenchmark(
+        "a male person",
+        n=1,
+        mode="single",
+        dataset_root=tmp_path / "dataset",
+        results_root=tmp_path / "results",
+        selector=rank_only_selector,
+        generate_missing=False,
+    )
+    stage = benchmark.stages[0]
+    _write_dummy_images(stage.stage_dir / "male", 1)
+    _write_dummy_images(stage.stage_dir / "female", 1)
+
+    results = benchmark.run(display=False)
+
+    assert results["is_positive"].tolist() == [True, False]
+    assert results["selector_score"].tolist() == [-1.0, -2.0]
