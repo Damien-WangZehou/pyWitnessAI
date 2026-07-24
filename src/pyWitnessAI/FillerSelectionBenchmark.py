@@ -3,14 +3,22 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Mapping
 
 import pandas as pd
 
+from .FaceAttributeSchema import DEFAULT_FACE_ATTRIBUTE_SCHEMA, FaceAttributeSchema
+from .FaceSearch import (
+    ClipSelectorBackend,
+    SelectorBackend,
+    SelectorQuery,
+    normalise_selector_scores,
+)
 from .FillerGenerator import FaceDescriptionSchema, FillerGenerator, ImageGenerationBackend
 from .GeneratedFaceDataset import DatasetMatchMode, GeneratedFaceDataset
+from .ImageCatalog import discover_images
 
 BenchmarkMode = Literal["single", "ladder"]
 SelectorCallable = Callable[[pd.DataFrame, str, int], pd.DataFrame]
@@ -24,128 +32,11 @@ __all__ = [
     "FillerSelectorBenchmark",
 ]
 
-SCHEMA_FEATURE_ORDER = (
-    "gender",
-    "age",
-    "hair",
-    "facial_hair",
-    "eyes",
-    "eyebrows",
-    "nose",
-    "build",
-    "face_shape",
-    "race",
-    "forehead",
-    "mouth",
-    "ears",
-    "jaw",
-    "teeth",
-    "expression",
-    "clothing",
-    "accessories",
-)
-
-SUBJECT_FEATURES = {"race", "gender"}
+SCHEMA_FEATURE_ORDER = DEFAULT_FACE_ATTRIBUTE_SCHEMA.feature_order
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
-
 DEFAULT_CONTRASTS = {
-    "gender": {
-        "male": "female",
-        "female": "male",
-    },
-    "age": {
-        "young adult": "older adult",
-        "middle-aged adult": "young adult",
-        "older adult": "young adult",
-    },
-    "hair": {
-        "long hair": "short hair",
-        "short hair": "long hair",
-        "bald head": "visible hair",
-        "dark hair": "light hair",
-        "light hair": "dark hair",
-    },
-    "facial_hair": {
-        "beard": "no facial hair",
-        "full beard": "no facial hair",
-        "mustache": "no facial hair",
-        "stubble": "no facial hair",
-        "no facial hair": "full beard",
-    },
-    "eyes": {
-        "blue eyes": "brown eyes",
-        "brown eyes": "blue eyes",
-        "green eyes": "brown eyes",
-        "dark eyes": "light eyes",
-        "light eyes": "dark eyes",
-    },
-    "eyebrows": {
-        "thick eyebrows": "thin eyebrows",
-        "thin eyebrows": "thick eyebrows",
-        "arched eyebrows": "straight eyebrows",
-    },
-    "nose": {
-        "broad nose": "narrow nose",
-        "narrow nose": "broad nose",
-        "long nose": "short nose",
-        "short nose": "long nose",
-    },
-    "build": {
-        "broad build": "slim build",
-        "slim build": "broad build",
-    },
-    "face_shape": {
-        "round face": "narrow face",
-        "narrow face": "round face",
-        "oval face": "square face",
-        "square face": "oval face",
-    },
-    "race": {
-        "White": "Asian",
-        "Asian": "White",
-        "Black": "White",
-        "Latino": "White",
-        "Indian": "White",
-        "Middle Eastern": "White",
-    },
-    "forehead": {
-        "high forehead": "low forehead",
-        "low forehead": "high forehead",
-    },
-    "mouth": {
-        "thin lips": "full lips",
-        "full lips": "thin lips",
-        "wide mouth": "small mouth",
-    },
-    "ears": {
-        "visible ears": "covered ears",
-        "covered ears": "visible ears",
-    },
-    "jaw": {
-        "strong jaw": "soft jawline",
-        "soft jawline": "strong jaw",
-    },
-    "teeth": {
-        "visible teeth": "no visible teeth",
-        "no visible teeth": "visible teeth",
-    },
-    "expression": {
-        "smiling expression": "neutral expression",
-        "open-mouth smile": "closed-mouth smile",
-        "closed-mouth smile": "open-mouth smile",
-        "neutral expression": "smiling expression",
-    },
-    "clothing": {
-        "gray shirt": "black shirt",
-        "white shirt": "black shirt",
-        "black shirt": "white shirt",
-    },
-    "accessories": {
-        "glasses": "no glasses",
-        "sunglasses": "no glasses",
-        "hat": "no hat",
-        "cap": "no cap",
-    },
+    definition.name: dict(definition.contrasts)
+    for definition in DEFAULT_FACE_ATTRIBUTE_SCHEMA.definitions
 }
 
 
@@ -181,7 +72,7 @@ class FillerSelectionBenchmark:
         generator_model: str | None = None,
         generator_backend: ImageGenerationBackend | None = None,
         generator_backend_kwargs: Mapping[str, object] | None = None,
-        selector: str | SelectorCallable = "clip",
+        selector: str | SelectorCallable | SelectorBackend = "clip",
         selector_model: str = "clip-ViT-B-32",
         device: str | None = None,
         image_size: str = "1024x1024",
@@ -191,6 +82,7 @@ class FillerSelectionBenchmark:
         overwrite_generated: bool = False,
         dataset_match: DatasetMatchMode = "exact",
         contrast_overrides: dict[str, str] | None = None,
+        attribute_schema: FaceAttributeSchema | None = None,
     ) -> None:
         if mode not in {"single", "ladder"}:
             raise ValueError("mode must be 'single' or 'ladder'.")
@@ -218,9 +110,13 @@ class FillerSelectionBenchmark:
         self.overwrite_generated = overwrite_generated
         self.dataset_match = dataset_match
         self.contrast_overrides = contrast_overrides or {}
+        self.attribute_schema = attribute_schema or DEFAULT_FACE_ATTRIBUTE_SCHEMA
         self.dataset = GeneratedFaceDataset(self.dataset_root)
 
-        self.schema = FillerGenerator.parse_description(verbal_description)
+        self.schema = FillerGenerator.parse_description(
+            verbal_description,
+            attribute_schema=self.attribute_schema,
+        )
         self.case_slug = _case_slug(verbal_description)
         self.stages = self._build_stages()
         self.results_: pd.DataFrame = pd.DataFrame()
@@ -368,9 +264,10 @@ class FillerSelectionBenchmark:
             f"  images_dir: {self.dataset.images_dir}",
             f"  manifest: {self.dataset.manifest_path}",
             f"  dataset_match: {self.dataset_match}",
+            f"  attribute_schema: {self.attribute_schema.name}",
             f"  case_slug: {self.case_slug}",
             f"  selector: {self.selector}",
-            f"  selector_model: {self.selector_model}",
+            f"  selector_model: {_selector_model_label(self.selector, self.selector_model)}",
             "  stages:",
         ]
         for stage in self.stages:
@@ -383,9 +280,9 @@ class FillerSelectionBenchmark:
         active_positive = {}
         stages = []
         step = 0
-        schema_values = asdict(self.schema)
+        schema_values = self.schema.attribute_values()
 
-        for feature in SCHEMA_FEATURE_ORDER:
+        for feature in self.attribute_schema.feature_order:
             positive_value = schema_values.get(feature)
             if not positive_value:
                 continue
@@ -442,8 +339,11 @@ class FillerSelectionBenchmark:
             numeric_age = re.search(r"\b(\d{2})\b", str(positive_value))
             if numeric_age:
                 return "older adult" if int(numeric_age.group(1)) < 50 else "young adult"
-        contrast_map = DEFAULT_CONTRASTS.get(feature, {})
-        return contrast_map.get(positive_value)
+        return self.attribute_schema.contrast_for(
+            feature,
+            positive_value,
+            override=self.contrast_overrides.get(feature),
+        )
 
     def _ensure_stage_dataset(self, stage: BenchmarkStage, generate_missing: bool) -> pd.DataFrame:
         positive = self.dataset.select(
@@ -633,11 +533,28 @@ class FillerSelectionBenchmark:
         manifest: pd.DataFrame,
         rebuild_index: bool,
     ) -> pd.DataFrame:
+        if isinstance(self.selector, SelectorBackend):
+            raw = self.selector.score(manifest.copy(), SelectorQuery.from_text(stage.query))
+            return normalise_selector_scores(
+                manifest,
+                raw,
+                backend_name=self.selector.name,
+                model_name=self.selector.model_name,
+            )
         if callable(self.selector):
-            ranked = self.selector(manifest.copy(), stage.query, len(manifest))
-            return _normalise_selector_results(ranked, manifest, stage)
+            raw = self.selector(manifest.copy(), stage.query, len(manifest))
+            raw = _adapt_legacy_selector_results(raw)
+            return normalise_selector_scores(
+                manifest,
+                raw,
+                backend_name="callable",
+                model_name=self.selector_model,
+            )
         if self.selector != "clip":
-            raise ValueError("selector must be 'clip' or a callable(manifest, query, top_k).")
+            raise ValueError(
+                "selector must be 'clip', a SelectorBackend, or a "
+                "callable(manifest, query, top_k)."
+            )
         return self._run_clip_selector(stage, manifest, rebuild_index=rebuild_index)
 
     def _run_clip_selector(
@@ -646,22 +563,22 @@ class FillerSelectionBenchmark:
         manifest: pd.DataFrame,
         rebuild_index: bool,
     ) -> pd.DataFrame:
-        from .cfd_clip_pilot.clip_backend import SentenceTransformerClipEncoder
-        from .cfd_clip_pilot.index import ClipIndex
-
         index_dir = self.results_root / "indices" / self.selector_model.replace("/", "_").replace("-", "_") / self.mode / self.case_slug / stage.stage_name
-        encoder = SentenceTransformerClipEncoder(model_name=self.selector_model, device=self.device)
-        if (index_dir / "image_embeddings.npy").exists() and not rebuild_index:
-            index = ClipIndex.load(index_dir)
-        else:
-            index = ClipIndex.build(manifest, encoder=encoder, show_progress=True)
-            index.save(index_dir)
-
-        ranked = index.search_texts([stage.query], encoder=encoder, top_k=len(manifest))
-        labels = manifest[["image_id", "label_role", "label", "is_positive", "feature", "stage"]]
-        ranked = ranked.merge(labels, on="image_id", how="left")
-        ranked["selector_score"] = ranked["clip_score"]
-        return ranked
+        backend = ClipSelectorBackend(
+            model_name=self.selector_model,
+            device=self.device,
+            index_dir=index_dir,
+            show_progress=True,
+            rebuild_index=rebuild_index,
+            preprocess="whole_image",
+        )
+        raw = backend.score(manifest.copy(), SelectorQuery.from_text(stage.query))
+        return normalise_selector_scores(
+            manifest,
+            raw,
+            backend_name=backend.name,
+            model_name=backend.model_name,
+        )
 
     def _summarise_stage(self, stage: BenchmarkStage, ranked: pd.DataFrame) -> dict[str, object]:
         top_k = min(self.n, len(ranked))
@@ -739,11 +656,12 @@ class FillerSelectionBenchmark:
             "mode": self.mode,
             "case_slug": self.case_slug,
             "dataset_root": str(self.dataset_root),
-            "selector": self.selector if isinstance(self.selector, str) else "callable",
-            "selector_model": self.selector_model,
+            "selector": _selector_label(self.selector),
+            "selector_model": _selector_model_label(self.selector, self.selector_model),
             "generator_provider": self.generator_provider,
             "generator_model": self.generator_model,
-            "schema": asdict(self.schema),
+            "schema": self.schema.to_dict(),
+            "attribute_schema": self.attribute_schema.to_records(),
         }
         (output_dir / "metadata.json").write_text(
             json.dumps(metadata, indent=2, ensure_ascii=False),
@@ -761,10 +679,36 @@ FillerSelectorBenchmark = FillerSelectionBenchmark
 
 
 def _schema_from_fields(original_description: str, fields: dict[str, str]) -> FaceDescriptionSchema:
-    schema = FaceDescriptionSchema(original_description=original_description)
-    for key, value in fields.items():
-        schema = replace(schema, **{key: value})
-    return schema
+    return FaceDescriptionSchema.from_attributes(original_description, fields)
+
+
+def _selector_label(selector: object) -> str:
+    if isinstance(selector, SelectorBackend):
+        return selector.name
+    return selector if isinstance(selector, str) else "callable"
+
+
+def _selector_model_label(selector: object, fallback: str) -> str:
+    return selector.model_name if isinstance(selector, SelectorBackend) else fallback
+
+
+def _adapt_legacy_selector_results(results: pd.DataFrame) -> pd.DataFrame:
+    """Preserve rank-only legacy callables while the shared backend stays strict."""
+    if not isinstance(results, pd.DataFrame):
+        return results
+    score_columns = {"selector_score", "decision_score", "score", "clip_score"}
+    if score_columns.intersection(results.columns):
+        return results
+
+    output = results.copy()
+    if "rank" in output.columns:
+        ranks = pd.to_numeric(output["rank"], errors="coerce")
+        if ranks.isna().any():
+            raise ValueError("Legacy selector rank values must be numeric when no score is returned.")
+        output["selector_score"] = -ranks.astype(float)
+    else:
+        output["selector_score"] = [-float(index) for index in range(len(output))]
+    return output
 
 
 def _schema_query(schema: FaceDescriptionSchema) -> str:
@@ -778,13 +722,8 @@ def _schema_query(schema: FaceDescriptionSchema) -> str:
 
 
 def _schema_filter_text(schema: FaceDescriptionSchema) -> str:
-    values = asdict(schema)
-    parts = []
-    for key in SCHEMA_FEATURE_ORDER:
-        value = values.get(key)
-        if value:
-            parts.append(f"{key}={value}")
-    other_details = values.get("other_details") or ()
+    parts = [f"{key}={value}" for key, value in schema.attribute_values().items()]
+    other_details = schema.other_details
     if other_details:
         parts.append("other_details=" + " | ".join(other_details))
     return "; ".join(parts)
@@ -802,43 +741,4 @@ def _case_slug(text: str) -> str:
 
 
 def _image_files(folder: Path) -> list[Path]:
-    if not folder.exists():
-        return []
-    return sorted(
-        [
-            path
-            for path in folder.iterdir()
-            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-        ],
-        key=lambda path: path.name.lower(),
-    )
-
-
-def _normalise_selector_results(
-    ranked: pd.DataFrame,
-    manifest: pd.DataFrame,
-    stage: BenchmarkStage,
-) -> pd.DataFrame:
-    if "image_path" not in ranked.columns and "image_id" not in ranked.columns:
-        raise ValueError("Custom selector results must contain image_path or image_id.")
-    output = ranked.copy()
-    if "rank" not in output.columns:
-        output["rank"] = range(1, len(output) + 1)
-    if "selector_score" not in output.columns:
-        if "score" in output.columns:
-            output["selector_score"] = output["score"]
-        elif "clip_score" in output.columns:
-            output["selector_score"] = output["clip_score"]
-        else:
-            output["selector_score"] = pd.NA
-
-    label_columns = ["label_role", "label", "is_positive", "feature", "stage"]
-    output = output.drop(columns=[column for column in label_columns if column in output.columns])
-    labels = manifest[["image_id", "image_path", "label_role", "label", "is_positive", "feature", "stage"]]
-    if "image_id" in output.columns:
-        output = output.merge(labels.drop(columns=["image_path"]), on="image_id", how="left")
-    else:
-        output = output.merge(labels.drop(columns=["image_id"]), on="image_path", how="left")
-    output["stage"] = stage.stage_name
-    output["feature"] = stage.feature
-    return output.sort_values("rank").reset_index(drop=True)
+    return discover_images(folder, recursive=False, extensions=IMAGE_EXTENSIONS)
