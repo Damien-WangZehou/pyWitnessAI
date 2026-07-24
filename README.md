@@ -266,6 +266,18 @@ df_tp = pipe_tp.run(output_csv="result_tp.csv", export_pywitness=True)
 
 ---
 
+## Face search
+
+`FaceSearch` recursively scans an image folder, scores every valid image with a
+selected backend, applies an explicit match rule, and returns the matching faces
+as a DataFrame. Optional metadata can be joined to the catalog and evaluated
+with an explicit ground-truth rule to report hit counts.
+
+See [docs/FaceSearch.md](docs/FaceSearch.md) for examples, metadata join rules,
+custom selector backends, caching, and result display.
+
+---
+
 ## FAQ
 
 **Q: My similarity matrix is empty?**
