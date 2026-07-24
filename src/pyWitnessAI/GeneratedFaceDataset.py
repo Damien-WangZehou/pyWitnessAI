@@ -3,39 +3,19 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
 
 import pandas as pd
 
+from .FaceAttributeSchema import DEFAULT_FACE_ATTRIBUTE_SCHEMA
 from .FillerGenerator import FaceDescriptionSchema, FillerGenerator, GeneratedFiller, ImageGenerationBackend
 
 DatasetMatchMode = Literal["exact", "contains"]
 
 DEFAULT_GENERATED_FACE_DATASET_ROOT = Path("./data/generated_filler_benchmark")
-SCHEMA_COLUMNS = (
-    "gender",
-    "race",
-    "age",
-    "hair",
-    "facial_hair",
-    "eyes",
-    "eyebrows",
-    "nose",
-    "build",
-    "face_shape",
-    "forehead",
-    "mouth",
-    "ears",
-    "jaw",
-    "teeth",
-    "expression",
-    "clothing",
-    "accessories",
-    "other_details",
-)
+SCHEMA_COLUMNS = (*DEFAULT_FACE_ATTRIBUTE_SCHEMA.feature_order, "other_details")
 
 __all__ = [
     "DEFAULT_GENERATED_FACE_DATASET_ROOT",
@@ -134,7 +114,12 @@ class GeneratedFaceDataset:
             rows = rows.loc[_series_text(rows[column]) == str(value)]
 
         if match == "exact":
-            for column in SCHEMA_COLUMNS:
+            attribute_columns = [
+                column
+                for column in rows.columns
+                if column in SCHEMA_COLUMNS or column.startswith("attribute__")
+            ]
+            for column in attribute_columns:
                 if column in required:
                     continue
                 if column in rows.columns:
@@ -351,7 +336,8 @@ class GeneratedFaceDataset:
             "quality": generator.quality,
             "output_format": generator.output_format,
             "naming_strategy": generator.naming_strategy,
-            "schema": asdict(generator.schema),
+            "schema": generator.schema.to_dict(),
+            "attribute_schema": generator.attribute_schema.to_records(),
             "image_ids": [row.get("image_id") for row in rows],
         }
         (self.batches_dir / f"{generator.batch_id}.json").write_text(
@@ -382,7 +368,7 @@ class GeneratedFaceDataset:
             "source_label_role": source_label_role,
             "provider": "",
             "model": "",
-            "schema": asdict(schema),
+            "schema": schema.to_dict(),
             "image_ids": [row.get("image_id") for row in rows],
             "source_image_paths": [row.get("source_image_path") for row in rows],
         }
@@ -406,14 +392,13 @@ class GeneratedFaceDataset:
 
 
 def _schema_values(schema: FaceDescriptionSchema) -> dict[str, str]:
-    values = {}
-    raw = asdict(schema)
-    for column in SCHEMA_COLUMNS:
-        value = raw.get(column)
-        if column == "other_details":
-            value = " | ".join(value or ())
-        if value:
-            values[column] = str(value)
+    values = {
+        _attribute_column(name): str(value)
+        for name, value in schema.attribute_values().items()
+        if value
+    }
+    if schema.other_details:
+        values["other_details"] = " | ".join(schema.other_details)
     return values
 
 
@@ -421,6 +406,10 @@ def _schema_row(schema: FaceDescriptionSchema) -> dict[str, str]:
     row = {column: "" for column in SCHEMA_COLUMNS}
     row.update(_schema_values(schema))
     return row
+
+
+def _attribute_column(name: str) -> str:
+    return name if name in SCHEMA_COLUMNS else f"attribute__{name}"
 
 
 def _schema_hash(schema: FaceDescriptionSchema) -> str:
