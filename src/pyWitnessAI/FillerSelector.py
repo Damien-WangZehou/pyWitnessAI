@@ -7,6 +7,13 @@ from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
 
 class CLIPFillerSelector:
+    """Legacy largest-face CLIP selector.
+
+    New folder-search workflows should use :class:`pyWitnessAI.FaceSearch`.
+    This class keeps its historical largest-face cropping and tuple-list return
+    format so existing experiments do not silently change behaviour.
+    """
+
     def __init__(self, image_dir: str, cache_dir: str = './cache', device: str = None):
         """
         :param image_dir: The directory of filler pool
