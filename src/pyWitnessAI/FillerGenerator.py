@@ -5,10 +5,16 @@ import hashlib
 import json
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Mapping, Sequence
+from typing import Literal, Mapping
+
+from .FaceAttributeSchema import (
+    DEFAULT_FACE_ATTRIBUTE_SCHEMA,
+    FaceAttributeDefinition,
+    FaceAttributeSchema,
+)
 
 from .filler_generation_backends import (
     DEFAULT_IMAGE_MODEL,
@@ -27,6 +33,9 @@ KNOWN_IMAGE_MODELS = OPENAI_IMAGE_MODELS
 
 __all__ = [
     "FaceDescriptionSchema",
+    "FaceAttributeDefinition",
+    "FaceAttributeSchema",
+    "DEFAULT_FACE_ATTRIBUTE_SCHEMA",
     "FillerGenerator",
     "GeneratedFiller",
     "ImageGenerationBackend",
@@ -62,6 +71,66 @@ class FaceDescriptionSchema:
     clothing: str | None = None
     accessories: str | None = None
     other_details: tuple[str, ...] = field(default_factory=tuple)
+    hair_color: str | None = None
+    hair_texture: str | None = None
+    eyebrow_color: str | None = None
+    custom_attributes: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+
+    @classmethod
+    def from_attributes(
+        cls,
+        original_description: str,
+        attributes: Mapping[str, str],
+        *,
+        other_details: tuple[str, ...] = (),
+    ) -> "FaceDescriptionSchema":
+        field_names = {item.name for item in fields(cls)}
+        known = {
+            key: value
+            for key, value in attributes.items()
+            if key in field_names and key not in {"original_description", "custom_attributes", "other_details"}
+        }
+        custom = tuple(
+            sorted(
+                (str(key), str(value))
+                for key, value in attributes.items()
+                if value and key not in known
+            )
+        )
+        return cls(
+            original_description=original_description,
+            custom_attributes=custom,
+            other_details=tuple(other_details),
+            **known,
+        )
+
+    def attribute_values(self) -> dict[str, str]:
+        excluded = {"original_description", "custom_attributes", "other_details"}
+        values = {
+            item.name: str(getattr(self, item.name))
+            for item in fields(self)
+            if item.name not in excluded and getattr(self, item.name)
+        }
+        values.update({str(key): str(value) for key, value in self.custom_attributes if value})
+        return values
+
+    def with_attributes(self, attributes: Mapping[str, str]) -> "FaceDescriptionSchema":
+        values = self.attribute_values()
+        values.update({str(key): str(value) for key, value in attributes.items() if value})
+        return self.from_attributes(
+            self.original_description,
+            values,
+            other_details=self.other_details,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        values: dict[str, object] = {
+            "original_description": self.original_description,
+            **self.attribute_values(),
+        }
+        if self.other_details:
+            values["other_details"] = list(self.other_details)
+        return values
 
     def subject_phrase(self) -> str:
         subject_terms = []
@@ -75,11 +144,19 @@ class FaceDescriptionSchema:
         return " ".join(subject_terms)
 
     def detail_phrases(self) -> list[str]:
-        fields = [
-            self.hair,
+        hair = _combine_attribute_labels(
+            (self.hair, self.hair_texture, self.hair_color),
+            noun="hair",
+        )
+        eyebrows = _combine_attribute_labels(
+            (self.eyebrow_color, self.eyebrows),
+            noun="eyebrows",
+        )
+        detail_fields = [
+            hair,
             self.facial_hair,
             self.eyes,
-            self.eyebrows,
+            eyebrows,
             self.nose,
             self.build,
             self.face_shape,
@@ -92,7 +169,8 @@ class FaceDescriptionSchema:
             self.clothing,
             self.accessories,
         ]
-        return [text for text in fields if text] + list(self.other_details)
+        custom = [value for _, value in self.custom_attributes]
+        return [text for text in detail_fields if text] + custom + list(self.other_details)
 
     def to_generation_prompt(self, variation: str | None = None) -> str:
         details = self.detail_phrases()
@@ -144,6 +222,7 @@ class FillerGenerator:
         overwrite: bool = False,
         sleep: float = 0.0,
         schema: FaceDescriptionSchema | None = None,
+        attribute_schema: FaceAttributeSchema | None = None,
         naming_strategy: Literal["sequential", "batch"] = "sequential",
         batch_id: str | None = None,
         image_id_prefix: str = "gf",
@@ -165,7 +244,11 @@ class FillerGenerator:
         self.output_format = output_format.lower()
         self.overwrite = overwrite
         self.sleep = sleep
-        self.schema = schema or self.parse_description(verbal_description)
+        self.attribute_schema = attribute_schema or DEFAULT_FACE_ATTRIBUTE_SCHEMA
+        self.schema = schema or self.parse_description(
+            verbal_description,
+            attribute_schema=self.attribute_schema,
+        )
         self.naming_strategy = naming_strategy
         self.image_id_prefix = _slug_token(image_id_prefix or "gf")
         self.write_metadata = write_metadata
@@ -186,105 +269,21 @@ class FillerGenerator:
         return available_image_generation_providers()
 
     @classmethod
-    def parse_description(cls, description: str) -> FaceDescriptionSchema:
+    def parse_description(
+        cls,
+        description: str,
+        *,
+        attribute_schema: FaceAttributeSchema | None = None,
+    ) -> FaceDescriptionSchema:
         """Parse a free-text facial description into the project schema.
 
         This is deliberately conservative and rule-based. It extracts common
         eyewitness-style feature phrases without inventing attributes.
         """
-        text = _normalise_text(description)
-        original = description.strip()
-
-        return FaceDescriptionSchema(
-            original_description=original,
-            gender=_first_match(
-                text,
-                [
-                    (r"\b(dude|guy|man|male|gentleman)\b", "male"),
-                    (r"\b(woman|female|lady)\b", "female"),
-                    (r"\b(nonbinary|non-binary)\b", "non-binary"),
-                ],
-            ),
-            race=_first_match(
-                text,
-                [
-                    (r"\b(white|caucasian)\b", "White"),
-                    (r"\b(asian|east asian|south asian)\b", "Asian"),
-                    (r"\b(black|african)\b", "Black"),
-                    (r"\b(latino|latina|hispanic)\b", "Latino"),
-                    (r"\b(indian)\b", "Indian"),
-                    (r"\b(middle eastern|arab)\b", "Middle Eastern"),
-                ],
-            ),
-            age=_parse_age(text),
-            hair=_parse_hair(text),
-            facial_hair=_parse_facial_hair(text),
-            eyes=_parse_eyes(text),
-            eyebrows=_first_match(
-                text,
-                [
-                    (r"\b(thick|bushy)\s+eyebrows?\b", "thick eyebrows"),
-                    (r"\b(thin|fine)\s+eyebrows?\b", "thin eyebrows"),
-                    (r"\b(arched)\s+eyebrows?\b", "arched eyebrows"),
-                ],
-            ),
-            nose=_first_match(
-                text,
-                [
-                    (r"\b(broad|wide)\s+nose\b", "broad nose"),
-                    (r"\b(narrow|thin)\s+nose\b", "narrow nose"),
-                    (r"\b(long)\s+nose\b", "long nose"),
-                    (r"\b(short)\s+nose\b", "short nose"),
-                ],
-            ),
-            build=_first_match(
-                text,
-                [
-                    (r"\b(broad|heavy|stocky)\s+build\b", "broad build"),
-                    (r"\b(slim|thin|slender)\s+build\b", "slim build"),
-                ],
-            ),
-            face_shape=_first_match(
-                text,
-                [
-                    (r"\b(round)\s+face\b", "round face"),
-                    (r"\b(oval)\s+face\b", "oval face"),
-                    (r"\b(narrow|long)\s+face\b", "narrow face"),
-                    (r"\b(square)\s+face\b", "square face"),
-                ],
-            ),
-            forehead=_first_match(
-                text,
-                [
-                    (r"\bhigh\s+forehead\b", "high forehead"),
-                    (r"\blow\s+forehead\b", "low forehead"),
-                ],
-            ),
-            mouth=_parse_mouth(text),
-            ears=_first_match(
-                text,
-                [
-                    (r"\bvisible\s+ears?\b", "visible ears"),
-                    (r"\b(covered|hidden)\s+ears?\b", "covered ears"),
-                ],
-            ),
-            jaw=_first_match(
-                text,
-                [
-                    (r"\b(strong|square)\s+jaw(line)?\b", "strong jaw"),
-                    (r"\bsoft\s+jaw(line)?\b", "soft jawline"),
-                ],
-            ),
-            teeth=_first_match(
-                text,
-                [
-                    (r"\b(no|without)\s+visible\s+teeth\b", "no visible teeth"),
-                    (r"\bvisible\s+teeth\b", "visible teeth"),
-                ],
-            ),
-            expression=_parse_expression(text),
-            clothing=_parse_clothing(text),
-            accessories=_parse_accessories(text),
+        active_schema = attribute_schema or DEFAULT_FACE_ATTRIBUTE_SCHEMA
+        return FaceDescriptionSchema.from_attributes(
+            original_description=description.strip(),
+            attributes=active_schema.parse(description),
         )
 
     def generation_prompts(self) -> list[str]:
@@ -411,7 +410,7 @@ class FillerGenerator:
         if self.clip_model:
             lines.append(f"  note: {self.clip_model} is a CLIP retrieval model; using {self.model} for generation.")
         lines.append("  schema:")
-        for key, value in asdict(self.schema).items():
+        for key, value in self.schema.to_dict().items():
             if value:
                 lines.append(f"    {key}: {value}")
         lines.append("  first prompt:")
@@ -490,7 +489,8 @@ class FillerGenerator:
         payload = {
             "created_at_utc": self.created_at_utc,
             "description": self.verbal_description,
-            "schema": asdict(self.schema),
+            "schema": self.schema.to_dict(),
+            "attribute_schema": self.attribute_schema.to_records(),
             "provider": self.provider,
             "model": self.model,
             "size": self.size,
@@ -513,7 +513,8 @@ class FillerGenerator:
             "size": self.size,
             "quality": self.quality,
             "output_format": self.output_format,
-            "schema": asdict(self.schema),
+            "schema": self.schema.to_dict(),
+            "attribute_schema": self.attribute_schema.to_records(),
             "results": [asdict(result) for result in self.results],
         }
         (self.output_dir / "generation_metadata.json").write_text(
@@ -563,10 +564,6 @@ class FillerGenerator:
         )
 
 
-def _normalise_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip().lower())
-
-
 def _short_hash(value: object, length: int = 8) -> str:
     if isinstance(value, str):
         text = value
@@ -584,140 +581,23 @@ def _slug_token(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", str(value).strip().lower()).strip("_") or "gf"
 
 
-def _first_match(text: str, patterns: Sequence[tuple[str, str]]) -> str | None:
-    for pattern, value in patterns:
-        if re.search(pattern, text):
-            return value
-    return None
-
-
-def _parse_age(text: str) -> str | None:
-    match = re.search(r"\b(?:around|about)?\s*(\d{2})\s*(?:years?\s*old|yo)?\b", text)
-    if match:
-        age = int(match.group(1))
-        if age < 18:
-            raise ValueError("FillerGenerator only supports synthetic adult faces; age must be 18 or older.")
-        return f"around {age} years old"
-    if re.search(r"\byoung\b", text):
-        return "young adult"
-    if re.search(r"\bmiddle[- ]aged\b", text):
-        return "middle-aged adult"
-    if re.search(r"\bold(er)?\b", text):
-        return "older adult"
-    return None
-
-
-def _parse_hair(text: str) -> str | None:
-    if re.search(r"\bbald\b", text):
+def _combine_attribute_labels(values: tuple[str | None, ...], *, noun: str) -> str | None:
+    labels = [value for value in values if value]
+    if not labels:
+        return None
+    if len(labels) == 1:
+        return labels[0]
+    if "bald head" in labels:
         return "bald head"
-    parts = []
-    length = _first_match(
-        text,
-        [
-            (r"\blong\s+hair\b", "long"),
-            (r"\bshort\s+hair\b", "short"),
-            (r"\bmedium[- ]length\s+hair\b", "medium-length"),
-        ],
-    )
-    color = _first_match(
-        text,
-        [
-            (r"\bblack\s+hair\b", "black"),
-            (r"\bbrown\s+hair\b", "brown"),
-            (r"\bblond(e)?\s+hair\b", "blond"),
-            (r"\bgray|grey\s+hair\b", "gray"),
-            (r"\bred\s+hair\b", "red"),
-            (r"\bdark\s+hair\b", "dark"),
-            (r"\blight\s+hair\b", "light"),
-        ],
-    )
-    if length:
-        parts.append(length)
-    if color:
-        parts.append(color)
-    if parts:
-        return " ".join(parts) + " hair"
-    if "hair" in text:
-        return "visible hair"
-    return None
 
-
-def _parse_facial_hair(text: str) -> str | None:
-    if re.search(r"\b(no beard|no facial hair|clean[- ]shaven|clean shaven)\b", text):
-        return "no facial hair"
-    if re.search(r"\b(full beard|big beard|thick beard)\b", text):
-        return "full beard"
-    if re.search(r"\bbeard(ed)?\b", text):
-        return "beard"
-    if re.search(r"\b(moustache|mustache)\b", text):
-        return "mustache"
-    if re.search(r"\bstubble\b", text):
-        return "stubble"
-    return None
-
-
-def _parse_eyes(text: str) -> str | None:
-    return _first_match(
-        text,
-        [
-            (r"\bblue\s+eyes?\b", "blue eyes"),
-            (r"\bbrown\s+eyes?\b", "brown eyes"),
-            (r"\bgreen\s+eyes?\b", "green eyes"),
-            (r"\bdark\s+eyes?\b", "dark eyes"),
-            (r"\blight\s+eyes?\b", "light eyes"),
-        ],
-    )
-
-
-def _parse_mouth(text: str) -> str | None:
-    return _first_match(
-        text,
-        [
-            (r"\bthin\s+lips?\b", "thin lips"),
-            (r"\bfull\s+lips?\b", "full lips"),
-            (r"\bwide\s+mouth\b", "wide mouth"),
-        ],
-    )
-
-
-def _parse_expression(text: str) -> str | None:
-    return _first_match(
-        text,
-        [
-            (r"\bopen[- ]mouth\s+smile\b", "open-mouth smile"),
-            (r"\bclosed[- ]mouth\s+smile\b", "closed-mouth smile"),
-            (r"\bsmil(e|ing)\b", "smiling expression"),
-            (r"\bneutral\s+expression\b", "neutral expression"),
-            (r"\bangry\b", "angry expression"),
-            (r"\bsad\b", "sad expression"),
-            (r"\bsurprised\b", "surprised expression"),
-        ],
-    )
-
-
-def _parse_clothing(text: str) -> str | None:
-    return _first_match(
-        text,
-        [
-            (r"\b(gray|grey)\s+(shirt|t-shirt|tee)\b", "gray shirt"),
-            (r"\bwhite\s+(shirt|t-shirt|tee)\b", "white shirt"),
-            (r"\bblack\s+(shirt|t-shirt|tee)\b", "black shirt"),
-            (r"\bsuit\b", "suit"),
-            (r"\bhoodie\b", "hoodie"),
-        ],
-    )
-
-
-def _parse_accessories(text: str) -> str | None:
-    return _first_match(
-        text,
-        [
-            (r"\bglasses\b", "glasses"),
-            (r"\bsunglasses\b", "sunglasses"),
-            (r"\bhat\b", "hat"),
-            (r"\bcap\b", "cap"),
-        ],
-    )
+    stems = []
+    for label in labels:
+        stem = re.sub(rf"\s+{re.escape(noun)}$", "", label, flags=re.IGNORECASE)
+        if stem == "visible" and len(labels) > 1:
+            continue
+        if stem and stem not in stems:
+            stems.append(stem)
+    return f"{' '.join(stems)} {noun}" if stems else labels[0]
 
 
 def _variation_phrase(index: int, total: int, include_age: bool = True) -> str:
