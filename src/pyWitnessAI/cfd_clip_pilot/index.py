@@ -23,6 +23,16 @@ class ClipIndex:
     manifest: pd.DataFrame
     metadata: dict = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        embeddings = np.asarray(self.image_embeddings, dtype=np.float32)
+        if embeddings.ndim != 2:
+            raise ValueError(f"image_embeddings must be 2D, got shape {embeddings.shape}.")
+        if len(embeddings) != len(self.manifest):
+            raise ValueError("Embedding count does not match manifest row count.")
+        _validate_manifest(self.manifest)
+        self.image_embeddings = l2_normalise(embeddings)
+        self.manifest = self.manifest.reset_index(drop=True).copy()
+
     @classmethod
     def build(
         cls,
@@ -31,13 +41,19 @@ class ClipIndex:
         batch_size: int = 32,
         show_progress: bool = False,
     ) -> "ClipIndex":
-        if "image_path" not in manifest.columns:
-            raise ValueError("Manifest must contain an image_path column.")
+        _validate_manifest(manifest)
 
-        embeddings = encoder.encode_images(
-            manifest["image_path"].tolist(),
-            batch_size=batch_size,
-            show_progress=show_progress,
+        embeddings = l2_normalise(
+            _ensure_2d(
+                np.asarray(
+                    encoder.encode_images(
+                        manifest["image_path"].tolist(),
+                        batch_size=batch_size,
+                        show_progress=show_progress,
+                    ),
+                    dtype=np.float32,
+                )
+            )
         )
         if len(embeddings) != len(manifest):
             raise ValueError("Embedding count does not match manifest row count.")
@@ -57,12 +73,28 @@ class ClipIndex:
         manifest = pd.read_csv(root / "manifest.csv")
         metadata_path = root / "metadata.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
-        return cls(l2_normalise(embeddings.astype(np.float32)), manifest, metadata)
+        if embeddings.ndim != 2:
+            raise ValueError(f"Cached embeddings must be 2D, got shape {embeddings.shape}.")
+        if len(embeddings) != len(manifest):
+            raise ValueError("Cached embedding count does not match cached manifest row count.")
+        _validate_manifest(manifest, prefix="Cached manifest")
+        expected_hash = metadata.get("embedding_sha256")
+        if expected_hash and expected_hash != _array_sha256(embeddings):
+            raise ValueError("Cached embedding hash does not match metadata.json.")
+        return cls(embeddings, manifest, metadata)
 
     def save(self, index_dir: str | Path) -> None:
         root = Path(index_dir)
         root.mkdir(parents=True, exist_ok=True)
-        np.save(root / "image_embeddings.npy", self.image_embeddings.astype(np.float32))
+        embeddings = np.asarray(self.image_embeddings, dtype=np.float32)
+        self.metadata.update(
+            {
+                "embedding_dim": int(embeddings.shape[1]) if embeddings.size else 0,
+                "image_count": int(len(self.manifest)),
+                "embedding_sha256": _array_sha256(embeddings),
+            }
+        )
+        np.save(root / "image_embeddings.npy", embeddings)
         self.manifest.to_csv(root / "manifest.csv", index=False)
         (root / "metadata.json").write_text(
             json.dumps(self.metadata, indent=2, sort_keys=True),
@@ -77,11 +109,18 @@ class ClipIndex:
         exclude_target_ids: Sequence[set[str]] | None = None,
     ) -> pd.DataFrame:
         """Search with pre-encoded text vectors and return long-form results."""
+        if top_k < 1:
+            raise ValueError("top_k must be >= 1.")
         if self.image_embeddings.size == 0:
             raise ValueError("Index is empty.")
 
         vectors = _ensure_2d(query_vectors).astype(np.float32)
         vectors = l2_normalise(vectors)
+        if vectors.shape[1] != self.image_embeddings.shape[1]:
+            raise ValueError(
+                "Query embedding dimension does not match image embedding dimension: "
+                f"{vectors.shape[1]} != {self.image_embeddings.shape[1]}."
+            )
         scores = vectors @ self.image_embeddings.T
         n_queries = vectors.shape[0]
         image_exclusions = _normalise_exclusions(exclude_image_ids, n_queries)
@@ -93,7 +132,7 @@ class ClipIndex:
         image_paths = self.manifest["image_path"].astype(str).tolist()
 
         for query_index in range(n_queries):
-            order = np.argsort(scores[query_index])[::-1]
+            order = np.argsort(-scores[query_index], kind="mergesort")
             rank = 0
             for image_index in order:
                 image_id = image_ids[image_index]
@@ -103,21 +142,39 @@ class ClipIndex:
                 if target_id in target_exclusions[query_index]:
                     continue
                 rank += 1
-                records.append(
+                result = {
+                    "query_index": query_index,
+                    "rank": rank,
+                    "image_index": int(image_index),
+                    "image_id": image_id,
+                    "target_id": target_id,
+                    "image_path": image_paths[image_index],
+                    "clip_score": float(scores[query_index, image_index]),
+                }
+                result.update(
                     {
-                        "query_index": query_index,
-                        "rank": rank,
-                        "image_index": int(image_index),
-                        "image_id": image_id,
-                        "target_id": target_id,
-                        "image_path": image_paths[image_index],
-                        "clip_score": float(scores[query_index, image_index]),
+                        column: value
+                        for column, value in self.manifest.iloc[int(image_index)].to_dict().items()
+                        if column not in result
                     }
                 )
+                records.append(result)
                 if rank >= top_k:
                     break
 
-        return pd.DataFrame.from_records(records)
+        if records:
+            return pd.DataFrame.from_records(records)
+        ordered = [
+            "query_index",
+            "rank",
+            "image_index",
+            "image_id",
+            "target_id",
+            "image_path",
+            "clip_score",
+        ]
+        metadata_columns = [column for column in self.manifest.columns if column not in ordered]
+        return pd.DataFrame(columns=ordered + metadata_columns)
 
     def search_texts(
         self,
@@ -140,6 +197,19 @@ class ClipIndex:
 
 def _array_sha256(values: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(values).tobytes()).hexdigest()
+
+
+def _validate_manifest(manifest: pd.DataFrame, *, prefix: str = "Manifest") -> None:
+    required = {"image_id", "target_id", "image_path"}
+    missing = sorted(required - set(manifest.columns))
+    if missing:
+        raise ValueError(f"{prefix} is missing required columns: {missing}")
+    for column in sorted(required):
+        values = manifest[column]
+        if values.isna().any() or values.astype(str).str.strip().eq("").any():
+            raise ValueError(f"{prefix} {column} values must not be empty.")
+    if manifest["image_id"].astype(str).duplicated().any():
+        raise ValueError(f"{prefix} image_id values must be unique.")
 
 
 def _ensure_2d(values: np.ndarray) -> np.ndarray:
