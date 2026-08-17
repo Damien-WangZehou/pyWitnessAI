@@ -76,6 +76,87 @@ class SentenceTransformerClipEncoder:
             return np.zeros((0, 0), dtype=np.float32)
         return l2_normalise(np.vstack(embeddings).astype(np.float32))
 
+    def prepare_text_chunks(
+        self,
+        text: str,
+        *,
+        max_tokens: int | None = None,
+    ) -> tuple[list[str], list[int], int, int]:
+        """Split text on the model's own token IDs without silent truncation.
+
+        CLIP text encoders have a short context window (77 tokens for the
+        model used by this project).  Returning explicit chunks lets callers
+        define and record how a longer response is aggregated rather than
+        allowing a tokenizer to discard its tail.
+        """
+
+        context_tokens = int(max_tokens or getattr(self.model, "max_seq_length", 0) or 77)
+        try:
+            first_module = self.model[0]
+            processor = first_module.processor
+            tokenizer = processor.tokenizer
+        except (AttributeError, IndexError, KeyError, TypeError) as exc:
+            raise RuntimeError(
+                "The loaded SentenceTransformer CLIP model does not expose its tokenizer."
+            ) from exc
+        configured_context = int(
+            getattr(
+                getattr(getattr(first_module, "model", None), "config", None),
+                "max_position_embeddings",
+                0,
+            )
+            or getattr(
+                getattr(
+                    getattr(getattr(first_module, "model", None), "config", None),
+                    "text_config",
+                    None,
+                ),
+                "max_position_embeddings",
+                0,
+            )
+            or 0
+        )
+        if configured_context:
+            context_tokens = min(context_tokens, configured_context)
+
+        special_tokens = int(tokenizer.num_special_tokens_to_add(pair=False))
+        content_budget = context_tokens - special_tokens
+        if content_budget < 1:
+            raise RuntimeError("The CLIP tokenizer has no usable text-token capacity.")
+
+        token_ids = list(tokenizer.encode(text, add_special_tokens=False, truncation=False))
+        if not token_ids:
+            raise ValueError("text must not be empty after tokenization.")
+        full_token_count = len(token_ids) + special_tokens
+        if len(token_ids) <= content_budget:
+            return [text], [len(token_ids)], full_token_count, context_tokens
+
+        chunks: list[str] = []
+        chunk_token_counts: list[int] = []
+        for start in range(0, len(token_ids), content_budget):
+            chunk_ids = token_ids[start : start + content_budget]
+            chunk = tokenizer.decode(
+                chunk_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            ).strip()
+            if not chunk:
+                raise RuntimeError("The CLIP tokenizer produced an empty text chunk.")
+            encoded_length = len(
+                tokenizer.encode(
+                    chunk,
+                    add_special_tokens=True,
+                    truncation=False,
+                )
+            )
+            if encoded_length > context_tokens:
+                raise RuntimeError(
+                    "A decoded CLIP text chunk exceeds the model context window."
+                )
+            chunks.append(chunk)
+            chunk_token_counts.append(len(chunk_ids))
+        return chunks, chunk_token_counts, full_token_count, context_tokens
+
 
 def l2_normalise(vectors: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
