@@ -1,0 +1,67 @@
+"""OpenAI Images API adapter for the generic image-generation contract."""
+
+from __future__ import annotations
+
+import base64
+import os
+from pathlib import Path
+
+from ..face_generation_backend import ImageGenerationBackend, ImageGenerationRequest
+
+
+DEFAULT_IMAGE_MODEL = "gpt-image-2"
+OPENAI_IMAGE_MODELS = (
+    "gpt-image-2",
+    "gpt-image-1.5",
+    "gpt-image-1",
+    "gpt-image-1-mini",
+)
+
+__all__ = ["DEFAULT_IMAGE_MODEL", "OPENAI_IMAGE_MODELS", "OpenAIImageBackend"]
+
+
+class OpenAIImageBackend(ImageGenerationBackend):
+    """OpenAI Images API backend."""
+
+    provider = "openai"
+    default_model = DEFAULT_IMAGE_MODEL
+    known_models = OPENAI_IMAGE_MODELS
+    supports_reference_image = True
+
+    def __init__(self, client=None) -> None:
+        self.client = client
+
+    def generate(self, request: ImageGenerationRequest) -> None:
+        self.validate_request(request)
+        client = self.client or self._create_client()
+        arguments = dict(
+            model=request.model,
+            prompt=request.prompt,
+            size=request.size,
+            quality=request.quality,
+            output_format=request.output_format,
+        )
+        if request.reference_image is None:
+            response = client.images.generate(**arguments)
+        else:
+            with Path(request.reference_image).open("rb") as reference_image:
+                response = client.images.edit(image=reference_image, **arguments)
+        images = getattr(response, "data", None) or []
+        image_base64 = getattr(images[0], "b64_json", None) if images else None
+        if not image_base64:
+            raise RuntimeError("OpenAI image response did not include base64 image data.")
+        request.output_path.write_bytes(base64.b64decode(image_base64))
+
+    @staticmethod
+    def _create_client():
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise EnvironmentError("Set OPENAI_API_KEY before calling generate().")
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise ImportError(
+                "OpenAI image generation requires the OpenAI SDK. "
+                "Install it with: python -m pip install 'pyWitnessAI[generation]'"
+            ) from exc
+        return OpenAI()
+

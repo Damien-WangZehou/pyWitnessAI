@@ -1,0 +1,69 @@
+{
+  "manifest_version": 1,
+  "repo_id": "sentence-transformers/clip-ViT-L-14",
+  "revision": "1b4b2e899178706d1b9905460ac21de1e0ba86a5",
+  "snapshot_hash_version": "model_snapshot_tree_sha256_v1",
+  "snapshot_sha256": "fc4ce36100d653b9871997f55bac8f100c1e43d471ec80fdad3338deb1e1bb90",
+  "files": [
+    {
+      "path": "0_CLIPModel/config.json",
+      "size": 4541,
+      "sha256": "748ed0be185b5da088bfb28a613b72560c9cf2268fd13419fa62d2aa32183003"
+    },
+    {
+      "path": "0_CLIPModel/merges.txt",
+      "size": 524657,
+      "sha256": "f526393189112391ce6f9795d4695f704121ce452c3aad1f5335cc41337eba85"
+    },
+    {
+      "path": "0_CLIPModel/model.safetensors",
+      "size": 1710540580,
+      "sha256": "a2bf730a0c7debf160f7a6b50b3aaf3703e7e88ac73de7a314903141db026dcb"
+    },
+    {
+      "path": "0_CLIPModel/preprocessor_config.json",
+      "size": 354,
+      "sha256": "20882a3f366cf91fe2e567ccd9520659ef701dfe2228aff23289c10cf4274676"
+    },
+    {
+      "path": "0_CLIPModel/pytorch_model.bin",
+      "size": 1710660257,
+      "sha256": "e33cd4b4a78c8a2f4b361665db761ab9971705bbd27706ee9299889dffd586ef"
+    },
+    {
+      "path": "0_CLIPModel/special_tokens_map.json",
+      "size": 389,
+      "sha256": "f8c0d6c39aee3f8431078ef6646567b0aba7f2246e9c54b8b99d55c22b707cbf"
+    },
+    {
+      "path": "0_CLIPModel/tokenizer.json",
+      "size": 2224003,
+      "sha256": "a83e0809aa4c3af7208b2df632a7a69668c6d48775b3c3fe4e1b1199d1f8b8f4"
+    },
+    {
+      "path": "0_CLIPModel/tokenizer_config.json",
+      "size": 733,
+      "sha256": "36acb9600daf68eaa6cc99e80e559d32b2b9d0501943ffe2a186fedb0f145318"
+    },
+    {
+      "path": "0_CLIPModel/vocab.json",
+      "size": 862328,
+      "sha256": "5047b556ce86ccaf6aa22b3ffccfc52d391ea4accdab9c2f2407da5b742d4363"
+    },
+    {
+      "path": "README.md",
+      "size": 1912,
+      "sha256": "88d2b7ed618c05bedbc9db3ec068ba12674c58162e862512a53d4512ce2a20da"
+    },
+    {
+      "path": "config_sentence_transformers.json",
+      "size": 118,
+      "sha256": "3dd1be4c4736aa4d4bb0f4153e54894ee2afc4c6ce40f583a479e5761c43d9a6"
+    },
+    {
+      "path": "modules.json",
+      "size": 122,
+      "sha256": "c05ee467d00d460b77a264597d9af76121e3e87300ae0777f3c8fdb9babaaa79"
+    }
+  ]
+}
