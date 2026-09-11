@@ -1,162 +1,210 @@
+"""Stable public imports without loading optional model or display libraries.
+
+Named exports are resolved from their owning module on first access. The
+star-import surface includes only APIs available with the base dependencies;
+vision APIs remain available through explicit imports. To access a module whose
+name is also a public class, use ``importlib.import_module("pyWitnessAI.FaceSearch")``.
+"""
+
 from __future__ import annotations
 
-from importlib import import_module
-import os
+from importlib import import_module as _import_module
+from importlib.metadata import PackageNotFoundError as _PackageNotFoundError
+from importlib.metadata import version as _distribution_version
+import sys as _sys
+from types import ModuleType as _ModuleType
 
 
-_OPTIONAL_DEPENDENCIES = {
-    "cv",
-    "cv2",
-    "deepface",
-    "facenet_pytorch",
-    "keras",
-    "mtcnn",
-    "retinaface",
-    "tensorflow",
-    "torch",
-}
-
-_EXPORT_MODULES = (
-    "utils.Constants",
-    "Images",
-    "ImagesAI",
-    "Video",
-    "VideoAI",
-    "VideoProcessor",
-    "Lineup",
-    "LineupDecider",
-    "VideoLineupPipeline",
-    "FaceAttributeSchema",
-    "ImageCatalog",
-    "FaceSearch",
-    "FillerGenerator",
-    "GeneratedFaceDataset",
-    "FillerSelectionBenchmark",
-    "AttributeRetrievalBenchmark",
-)
-_OPTIONAL_EXPORT_MODULES = set(_EXPORT_MODULES) - {"utils.Constants"}
-_EAGER_EXPORT_MODULES = (
-    "utils.Constants",
-    "FaceAttributeSchema",
-    "ImageCatalog",
-    "FaceSearch",
-    "FillerGenerator",
-    "GeneratedFaceDataset",
-    "FillerSelectionBenchmark",
-    "AttributeRetrievalBenchmark",
-)
-_LAZY_EXPORT_MODULES = {
-    module_path.rsplit(".", 1)[-1]: module_path
-    for module_path in _EXPORT_MODULES
-    if module_path not in _EAGER_EXPORT_MODULES
-}
-_STAR_EXPORTS = {
-    "Images",
-    "ImagesAI",
-    "Video",
-    "VideoAI",
-    "VideoProcessor",
-    "Lineup",
-    "LineupDecider",
-    "VideoLineupPipeline",
-    "FaceDescriptionSchema",
-    "FaceAttributeDefinition",
-    "FaceAttributeSchema",
-    "DEFAULT_FACE_ATTRIBUTE_SCHEMA",
-    "CatalogReport",
-    "ImageCatalog",
-    "MetadataJoinSpec",
-    "discover_images",
-    "SelectorQuery",
-    "SelectorBackend",
-    "CallableSelectorBackend",
-    "ClipSelectorBackend",
-    "MatchPolicy",
-    "AllRankedPolicy",
-    "TopKPolicy",
-    "MinScorePolicy",
-    "TopKAndMinScorePolicy",
-    "GroundTruthSpec",
-    "SelectionResult",
-    "FaceSearch",
-    "available_selector_backends",
-    "create_selector_backend",
-    "register_selector_backend",
-    "FillerGenerator",
-    "FillerSelectionBenchmark",
-    "FillerSelectorBenchmark",
-    "GeneratedFiller",
-    "GeneratedFaceDataset",
-    "DEFAULT_GENERATED_FACE_DATASET_ROOT",
-    "DatasetMatchMode",
-    "SCHEMA_COLUMNS",
-    "ImageGenerationBackend",
-    "ImageGenerationRequest",
-    "OpenAIImageBackend",
-    "available_image_generation_models",
-    "available_image_generation_providers",
-    "register_image_generation_backend",
-    "BenchmarkStage",
-    "AttributeProbeSpec",
-    "AttributeRetrievalBenchmark",
-    "AttributeSelector",
-    "ScoreMode",
-}
-
-__all__: list[str] = []
-_missing_optional_imports: dict[str, str] = {}
-
-
-def _export_public_names(module_path: str) -> None:
+try:
+    from ._version import __version__
+except ModuleNotFoundError as _version_error:
+    if _version_error.name != f"{__name__}._version":
+        raise
     try:
-        module = import_module(f"{__name__}.{module_path}")
-    except ModuleNotFoundError as exc:
-        if exc.name in _OPTIONAL_DEPENDENCIES:
-            _missing_optional_imports[module_path] = exc.name or "unknown"
-            return
-        raise
-    except Exception as exc:
-        if module_path in _OPTIONAL_EXPORT_MODULES:
-            _missing_optional_imports[module_path] = f"{type(exc).__name__}: {exc}"
-            return
-        raise
-
-    public_names = getattr(
-        module,
-        "__all__",
-        [name for name in dir(module) if not name.startswith("_")],
-    )
-    for name in public_names:
-        globals()[name] = getattr(module, name)
-        if name in _STAR_EXPORTS and name not in __all__:
-            __all__.append(name)
+        __version__ = _distribution_version("pyWitnessAI")
+    except _PackageNotFoundError:
+        __version__ = "0.0.1"
 
 
-_modules_to_export = (
-    _EXPORT_MODULES
-    if os.environ.get("PYWITNESSAI_EAGER_OPTIONAL_EXPORTS") == "1"
-    else _EAGER_EXPORT_MODULES
+# This registry is explicit: importing another module must never accidentally
+# publish its dependencies or choose a different owner for a shared name.
+_EXPORTS_BY_MODULE = {
+    "utils.Constants": (
+        "colors", "legend_colors", "line_styles", "get_random_color",
+        "get_color_for_analyzer", "get_style_for_analyzer",
+    ),
+    "Images": ("Images",),
+    "ImagesAI": ("ImagesAI",),
+    "ImagesCategorizer": ("organize_photos",),
+    "Video": ("Video",),
+    "VideoAI": (
+        "FrameAnalyzerMTCNNIndependent", "FrameAnalyzerOpenCVIndependent",
+        "FrameAnalyzerDeepface", "FrameAnalyzerMTCNN", "FrameAnalyzerOpenCV",
+        "FrameAnalyzerFastMTCNN", "SimilarityAnalyzer", "LineupLoader",
+    ),
+    "VideoProcessor": (
+        "FrameProcessorCropper", "FrameProcessorMonochrome",
+        "FrameProcessorNormalizer", "FrameProcessorRemover",
+        "FrameProcessorVideoWriter", "FrameProcessorDisplayer",
+        "FrameProcessorHistogramEqualization", "FrameProcessorNoiseReduction",
+        "FrameProcessorGammaCorrection", "FrameProcessorSharpening",
+    ),
+    "LineupBuilder": ("LineupBuilder", "Lineup", "LineupMember"),
+    "LineupSession": ("create_lineup", "LineupSession", "LineupRound"),
+    "LineupAIDecision": ("LineupAIDecision",),
+    "LineupDecider": ("LineupDecisionResult", "LineupDecider", "VerifyStyleDecider"),
+    "VideoLineupPipeline": (
+        "PipelineConfig", "export_for_pywitness", "VideoLineupPipeline",
+    ),
+    "FaceAttributeSchema": (
+        "FaceAttributeDefinition", "FaceAttributeSchema", "FaceDescriptionSchema",
+        "DEFAULT_FACE_ATTRIBUTE_SCHEMA", "LEGACY_FACE_ATTRIBUTE_SCHEMA_V1",
+    ),
+    "ImageCatalog": (
+        "CatalogReport", "ImageCatalog", "MetadataJoinSpec", "MetadataSource",
+        "IMAGE_EXTENSIONS", "discover_images", "image_paths", "image_manifest",
+    ),
+    "Description": (
+        "DescriptionParser", "DescriptionAttribute", "ParsedDescription",
+        "RawDescriptionParser", "RuleBasedDescriptionParser",
+        "LenientDescriptionParser", "StrictDescriptionParser", "SchemaDescriptionParser",
+        "create_description_parser", "normalize_description",
+    ),
+    "Scoring": (
+        "ScoringStrategy", "ScoringResult", "CosineScoring", "ContrastScoring",
+        "create_scoring_strategy",
+    ),
+    "FaceSearch": (
+        "SelectorQuery", "SelectorBackend", "CallableSelectorBackend",
+        "ClipSelectorBackend", "MatchPolicy", "AllRankedPolicy", "TopKPolicy",
+        "MinScorePolicy", "TopKAndMinScorePolicy", "GroundTruthSpec",
+        "SelectionResult", "FaceSearch", "available_selector_backends",
+        "create_selector_backend", "register_selector_backend",
+        "normalise_selector_scores",
+    ),
+    "FillerSelector": ("FillerSelector", "select_by_similarity"),
+    "FaceGenerator": ("FaceGenerator", "GeneratedFace"),
+    "FaceStandardizer": ("FaceStandardizer", "StandardizedFace"),
+    "CodeFormerEnhancer": ("CodeFormerEnhancer",),
+    "face_generation_backend": (
+        "ImageGenerationBackend", "ImageGenerationRequest",
+        "available_image_generation_models", "available_image_generation_providers",
+        "create_image_generation_backend", "register_image_generation_backend",
+    ),
+    "API.openai": ("OpenAIImageBackend",),
+    "GeneratedFaceDataset": (
+        "GeneratedFaceDataset", "DEFAULT_GENERATED_FACE_DATASET_ROOT",
+        "DatasetMatchMode", "SCHEMA_COLUMNS",
+    ),
+    "FillerSelectionBenchmark": (
+        "FillerSelectionBenchmark", "FillerSelectorBenchmark", "BenchmarkStage",
+        "MissingContrastPolicy", "UnusedContrastPolicy",
+    ),
+    "AttributeRetrievalBenchmark": (
+        "AttributeRetrievalBenchmark", "AttributeProbeSpec", "AttributeSelector",
+        "ScoreMode",
+    ),
+    "EyewitnessContrastPrompts": (
+        "Abstention", "AttributeEvidence", "ContrastPlan", "ContrastPromptPair",
+        "ContrastPromptRule", "ContrastPromptSchema", "EyewitnessContrastPromptBuilder",
+        "GENERIC_CONTRAST_SCHEMA", "AGE_PROMPT_TEMPLATE", "LENIENT_PARSER_VERSION",
+        "PARSER_VERSION", "PROMPT_TEMPLATE", "PROMPT_TEMPLATE_VERSION",
+    ),
+    "ContrastiveClipScoring": (
+        "ContrastMethod", "ContrastiveClipScorer", "ContrastiveScoreResult",
+        "DEFAULT_METHODS", "DEFAULT_NEUTRAL_PROMPT", "SCORER_VERSION",
+        "score_contrast_plans",
+    ),
+}
+_EXPORTS = {
+    name: (module_path, name)
+    for module_path, names in _EXPORTS_BY_MODULE.items()
+    for name in names
+}
+# These two historical names denote modules, not classes. CLI access is lazy.
+_EXPORTS.update({
+    "VideoAI": ("VideoAI", None),
+    "VideoProcessor": ("VideoProcessor", None),
+    "main": ("API.cli", "main"),
+})
+_VISION_MODULES = frozenset({
+    "ImagesAI", "Video", "VideoAI", "VideoProcessor", "VideoLineupPipeline",
+})
+__all__ = sorted(
+    name for name, (module_path, _) in _EXPORTS.items()
+    if module_path not in _VISION_MODULES and name != "main"
 )
+_EXPORT_CACHE: dict[str, object] = {}
 
-for _module_path in _modules_to_export:
-    _export_public_names(_module_path)
+# Catch only a genuinely missing, known optional dependency. Internal import
+# errors and installed-but-broken libraries retain their original traceback.
+_OPTIONAL_EXTRAS = {
+    "cv": "vision",
+    "cv2": "vision",
+    "deepface": "vision",
+    "facenet_pytorch": "vision",
+    "torchvision": "vision",
+    "tensorflow": "vision",
+    "tensorflow_intel": "vision",
+    "keras": "vision",
+    "tf_keras": "vision",
+    "mtcnn": "vision",
+    "retinaface": "vision",
+    "sentence_transformers": "clip",
+    "transformers": "clip",
+    "tokenizers": "clip",
+    "huggingface_hub": "clip",
+    "matplotlib": "plot",
+    "IPython": "notebook",
+    "openai": "generation",
+    "fastapi": "api",
+    "starlette": "api",
+    "pydantic": "api",
+    "uvicorn": "api",
+}
+
+
+def _load_export(name: str):
+    if name in _EXPORT_CACHE:
+        return _EXPORT_CACHE[name]
+    module_path, attribute = _EXPORTS[name]
+    try:
+        module = _import_module(f"{__name__}.{module_path}")
+    except ModuleNotFoundError as exc:
+        missing = exc.name or ""
+        extra = _OPTIONAL_EXTRAS.get(missing)
+        if missing == "torch":
+            extra = "vision" if module_path in _VISION_MODULES else "clip"
+        if extra is None:
+            raise
+        raise ModuleNotFoundError(
+            f"pyWitnessAI.{name} requires optional dependency {missing!r}. "
+            f'Install it with: pip install "pyWitnessAI[{extra}]"',
+            name=missing,
+        ) from exc
+    value = module if attribute is None else getattr(module, attribute)
+    _EXPORT_CACHE[name] = value
+    return value
 
 
 def __getattr__(name: str):
-    """Load legacy, dependency-heavy exports only when they are requested."""
-    module_path = _LAZY_EXPORT_MODULES.get(name)
-    if module_path is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-    _export_public_names(module_path)
-    if name in globals():
-        return globals()[name]
-
-    reason = _missing_optional_imports.get(module_path, "unknown import error")
-    raise AttributeError(
-        f"{name!r} is unavailable because {module_path!r} could not be imported: {reason}"
-    )
+    if name in _EXPORTS:
+        return _load_export(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-del _module_path
-del _modules_to_export
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_EXPORTS))
+
+
+class _PublicModule(_ModuleType):
+    def __getattribute__(self, name: str):
+        # importlib assigns submodules to their parent package. Intercept only
+        # declared public names so FaceSearch remains its class after either
+        # import order; module objects remain in sys.modules/importlib.
+        if name in _EXPORTS:
+            return _load_export(name)
+        return super().__getattribute__(name)
+
+
+_sys.modules[__name__].__class__ = _PublicModule

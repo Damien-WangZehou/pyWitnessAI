@@ -10,6 +10,7 @@ from typing import Callable, Literal, Sequence
 import numpy as np
 import pandas as pd
 
+from .clip import DEFAULT_CLIP_MODEL
 from .FaceAttributeSchema import DEFAULT_FACE_ATTRIBUTE_SCHEMA, FaceAttributeSchema
 from .FaceSearch import (
     ClipSelectorBackend,
@@ -23,7 +24,6 @@ ScoreMode = Literal["auto", "positive", "contrastive"]
 AttributeSelector = Callable[[pd.DataFrame, "AttributeProbeSpec"], pd.DataFrame]
 
 DEFAULT_RESULTS_ROOT = Path("./build/attribute_retrieval_benchmark")
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
 __all__ = [
     "AttributeProbeSpec",
@@ -42,6 +42,10 @@ class AttributeProbeSpec:
     negative_label: str
     positive_prompts: tuple[str, ...]
     negative_prompts: tuple[str, ...] = ()
+    contrast_source: str = "explicit"
+    attribute_schema_name: str | None = None
+    attribute_schema_version: str | None = None
+    attribute_schema_sha256: str | None = None
 
     def __post_init__(self) -> None:
         attribute = _slug(self.attribute)
@@ -49,15 +53,20 @@ class AttributeProbeSpec:
         negative_prompts = _prompt_tuple(self.negative_prompts)
         if not attribute:
             raise ValueError("attribute must not be empty.")
-        if not str(self.positive_label).strip() or not str(self.negative_label).strip():
+        positive_label = str(self.positive_label).strip()
+        negative_label = str(self.negative_label).strip()
+        if not positive_label or not negative_label:
             raise ValueError("positive_label and negative_label must not be empty.")
+        if positive_label.casefold() == negative_label.casefold():
+            raise ValueError("positive_label and negative_label must differ.")
         if not positive_prompts:
             raise ValueError("At least one positive prompt is required.")
         object.__setattr__(self, "attribute", attribute)
-        object.__setattr__(self, "positive_label", str(self.positive_label).strip())
-        object.__setattr__(self, "negative_label", str(self.negative_label).strip())
+        object.__setattr__(self, "positive_label", positive_label)
+        object.__setattr__(self, "negative_label", negative_label)
         object.__setattr__(self, "positive_prompts", positive_prompts)
         object.__setattr__(self, "negative_prompts", negative_prompts)
+        object.__setattr__(self, "contrast_source", str(self.contrast_source).strip() or "explicit")
 
     @classmethod
     def from_schema(
@@ -71,10 +80,13 @@ class AttributeProbeSpec:
         negative_prompts: str | Sequence[str] | None = None,
     ) -> "AttributeProbeSpec":
         definition = attribute_schema.require(attribute)
-        negative = negative_label or definition.contrast_for(positive_label)
+        explicit_negative = negative_label is not None
+        negative = negative_label if explicit_negative else definition.contrast_for(positive_label)
         if not negative:
             raise ValueError(
-                f"No contrast is defined for {attribute!r}={positive_label!r}; pass negative_label explicitly."
+                f"No explicit contrast is defined for {attribute!r}={positive_label!r}; "
+                f"pass negative_label explicitly or use a deliberately configured schema. "
+                f"Schema {attribute_schema.name!r} does not guess a negative anchor for this label."
             )
         positive_texts = positive_prompts or (_default_prompt(definition.prompt_role, positive_label),)
         negative_texts = negative_prompts or (_default_prompt(definition.prompt_role, negative),)
@@ -84,6 +96,14 @@ class AttributeProbeSpec:
             negative_label=negative,
             positive_prompts=_prompt_tuple(positive_texts),
             negative_prompts=_prompt_tuple(negative_texts),
+            contrast_source=(
+                "explicit:negative_label"
+                if explicit_negative
+                else f"schema:{attribute_schema.name}"
+            ),
+            attribute_schema_name=attribute_schema.name,
+            attribute_schema_version=attribute_schema.version,
+            attribute_schema_sha256=_attribute_schema_sha256(attribute_schema),
         )
 
     @property
@@ -112,7 +132,7 @@ class AttributeRetrievalBenchmark:
         image_path_column: str = "image_path",
         image_id_column: str = "image_id",
         selector: Literal["clip"] | AttributeSelector | SelectorBackend = "clip",
-        selector_model: str = "clip-ViT-B-32",
+        selector_model: str = DEFAULT_CLIP_MODEL,
         device: str | None = None,
         score_mode: ScoreMode = "auto",
         top_k: int | None = None,
@@ -155,8 +175,8 @@ class AttributeRetrievalBenchmark:
         recursive: bool = True,
         **kwargs,
     ) -> "AttributeRetrievalBenchmark":
-        positive_paths = _image_files(Path(positive_dir), recursive=recursive)
-        negative_paths = _image_files(Path(negative_dir), recursive=recursive)
+        positive_paths = discover_images(positive_dir, recursive=recursive)
+        negative_paths = discover_images(negative_dir, recursive=recursive)
         if not positive_paths:
             raise FileNotFoundError(f"No images found in positive_dir: {positive_dir}")
         if not negative_paths:
@@ -205,18 +225,15 @@ class AttributeRetrievalBenchmark:
             f"Running attribute probe: {self.probe.attribute} | "
             f"{self.probe.positive_label} vs {self.probe.negative_label}"
         )
-        if isinstance(self.selector, SelectorBackend):
-            scored = self._run_selector_backend()
-        elif callable(self.selector):
-            scored = self._run_custom_selector()
-        elif self.selector == "clip":
-            scored = self._run_clip(rebuild_index=rebuild_index)
+        self.results_ = self._run_selector(rebuild_index=rebuild_index)
+        if (
+            self.probe.negative_prompts
+            or callable(self.selector)
+            or isinstance(self.selector, SelectorBackend)
+        ):
+            self.results_["predicted_positive"] = self.results_["selector_score"] >= self.decision_threshold
         else:
-            raise ValueError(
-                "selector must be 'clip', a SelectorBackend, or a callable(manifest, probe)."
-            )
-
-        self.results_ = self._rank(scored)
+            self.results_["predicted_positive"] = pd.NA
         self.summary_ = pd.DataFrame([self._summarise()])
         self._write_results()
         if display:
@@ -244,19 +261,18 @@ class AttributeRetrievalBenchmark:
         if self.results_.empty:
             print("No benchmark results yet. Run benchmark.run() first.")
             return None
-        from .cfd_clip_pilot.visualization import show_clip_lineup
+        from ._image_display import show_ranked_images
 
-        n_show = min(top_k or self._evaluation_k(), len(self.results_))
+        n_show = self._evaluation_k() if top_k is None else top_k
         display_rows = self.results_.copy()
         display_rows["display_label"] = display_rows.apply(
             lambda row: f"{row['label']} | {'positive' if row['is_positive'] else 'negative'}",
             axis=1,
         )
-        fig = show_clip_lineup(
+        fig = show_ranked_images(
             display_rows,
             top_k=n_show,
             cols=cols,
-            target_position="none",
             score_col="selector_score",
             id_col="display_label",
             suptitle=None,
@@ -392,45 +408,35 @@ class AttributeRetrievalBenchmark:
             raise ValueError("Manifest must contain at least one positive and one negative image.")
         return output.reset_index(drop=True)
 
-    def _run_clip(self, *, rebuild_index: bool) -> pd.DataFrame:
-        backend = ClipSelectorBackend(
-            model_name=self.selector_model,
-            device=self.device,
-            index_dir=self._index_dir(),
-            show_progress=True,
-            rebuild_index=rebuild_index,
-            preprocess="whole_image",
-        )
-        raw = backend.score(self.manifest.copy(), self._selector_query())
-        return normalise_selector_scores(
-            self.manifest,
-            raw,
-            backend_name=backend.name,
-            model_name=backend.model_name,
-        )
-
-    def _run_selector_backend(self) -> pd.DataFrame:
+    def _run_selector(self, *, rebuild_index: bool) -> pd.DataFrame:
         backend = self.selector
-        raw = backend.score(self.manifest.copy(), self._selector_query())
+        if backend == "clip":
+            backend = ClipSelectorBackend(
+                model_name=self.selector_model,
+                device=self.device,
+                index_dir=self.results_root / "indices" / _slug(self.selector_model) / self.probe.slug,
+                show_progress=True,
+                rebuild_index=rebuild_index,
+                preprocess="whole_image",
+            )
+        if isinstance(backend, SelectorBackend):
+            raw = backend.score(self.manifest.copy(), self.selector_query)
+        elif callable(backend):
+            raw = backend(self.manifest.copy(), self.probe)
+        else:
+            raise ValueError(
+                "selector must be 'clip', a SelectorBackend, or a callable(manifest, probe)."
+            )
         return normalise_selector_scores(
             self.manifest,
             raw,
-            backend_name=backend.name,
-            model_name=backend.model_name,
+            backend_name=_selector_label(backend),
+            model_name=_selector_model_label(backend, self.selector_model),
         )
 
-    def _run_custom_selector(self) -> pd.DataFrame:
-        raw = self.selector(self.manifest.copy(), self.probe)
-        if not isinstance(raw, pd.DataFrame):
-            raise TypeError("Custom selector must return a pandas DataFrame.")
-        return normalise_selector_scores(
-            self.manifest,
-            raw,
-            backend_name="callable",
-            model_name=self.selector_model,
-        )
-
-    def _selector_query(self) -> SelectorQuery:
+    @property
+    def selector_query(self) -> SelectorQuery:
+        """Return the fully resolved query used by the selector backend."""
         return SelectorQuery(
             positive_texts=self.probe.positive_prompts,
             negative_texts=self.probe.negative_prompts,
@@ -438,25 +444,10 @@ class AttributeRetrievalBenchmark:
             description=self.probe.positive_prompts[0],
         )
 
-    def _rank(self, scored: pd.DataFrame) -> pd.DataFrame:
-        if len(scored) != len(self.manifest):
-            raise ValueError(
-                f"Selector returned {len(scored)} rows for a {len(self.manifest)}-image manifest."
-            )
-        output = scored.sort_values("selector_score", ascending=False, kind="mergesort").reset_index(drop=True)
-        output["rank"] = np.arange(1, len(output) + 1)
-        if (
-            self.probe.negative_prompts
-            or callable(self.selector)
-            or isinstance(self.selector, SelectorBackend)
-        ):
-            output["predicted_positive"] = output["selector_score"] >= self.decision_threshold
-        else:
-            output["predicted_positive"] = pd.NA
-        return output
-
     def _summarise(self) -> dict[str, object]:
         ranked = self.results_
+        label_sources = ranked.get("attribute_label_source", pd.Series(dtype=object)).dropna().astype(str).str.strip()
+        evaluation_label_source = "|".join(sorted(set(label_sources) - {""})) or "unspecified"
         labels = ranked["is_positive"].astype(bool).to_numpy()
         scores = ranked["selector_score"].astype(float).to_numpy()
         k = self._evaluation_k()
@@ -479,6 +470,7 @@ class AttributeRetrievalBenchmark:
             "attribute": self.probe.attribute,
             "positive_label": self.probe.positive_label,
             "negative_label": self.probe.negative_label,
+            "evaluation_label_source": evaluation_label_source,
             "selector": _selector_label(self.selector),
             "selector_model": _selector_model_label(self.selector, self.selector_model),
             "score_mode": self._resolved_score_mode(),
@@ -510,10 +502,6 @@ class AttributeRetrievalBenchmark:
             raise ValueError("score_mode='contrastive' requires at least one negative prompt.")
         return self.score_mode
 
-    def _index_dir(self) -> Path:
-        model_slug = _slug(self.selector_model)
-        return self.results_root / "indices" / model_slug / self.probe.slug
-
     def _write_results(self) -> None:
         output_dir = self.results_root / self.probe.slug
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -526,6 +514,10 @@ class AttributeRetrievalBenchmark:
                 "negative_label": self.probe.negative_label,
                 "positive_prompts": list(self.probe.positive_prompts),
                 "negative_prompts": list(self.probe.negative_prompts),
+                "contrast_source": self.probe.contrast_source,
+                "attribute_schema_name": self.probe.attribute_schema_name,
+                "attribute_schema_version": self.probe.attribute_schema_version,
+                "attribute_schema_sha256": self.probe.attribute_schema_sha256,
             },
             "selector": _selector_label(self.selector),
             "selector_model": _selector_model_label(self.selector, self.selector_model),
@@ -560,6 +552,17 @@ def _selector_label(selector: object) -> str:
     return selector if isinstance(selector, str) else "callable"
 
 
+def _attribute_schema_sha256(schema: FaceAttributeSchema) -> str:
+    payload = {
+        "name": schema.name,
+        "version": schema.version,
+        "definitions": schema.to_records(),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _selector_model_label(selector: object, fallback: str) -> str:
     return selector.model_name if isinstance(selector, SelectorBackend) else fallback
 
@@ -581,10 +584,6 @@ def _default_prompt(role: str, value: str) -> str:
 def _resolve_path(value: object, base_dir: Path) -> Path:
     path = Path(str(value))
     return path.resolve() if path.is_absolute() else (base_dir / path).resolve()
-
-
-def _image_files(folder: Path, *, recursive: bool) -> list[Path]:
-    return discover_images(folder, recursive=recursive, extensions=IMAGE_EXTENSIONS)
 
 
 def _slug(value: str) -> str:

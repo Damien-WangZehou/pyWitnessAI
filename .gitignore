@@ -18,6 +18,12 @@ dist/
 .venv/
 venv/
 
+# Deployment secrets; examples remain versioned.
+.env
+.env.*
+deployment.env
+*.env.local
+
 # IDE / tooling
 .vscode/
 .idea/
@@ -26,8 +32,8 @@ venv/
 # OS
 .DS_Store
 
-# Project data/outputs (Retain or move data.gitkeep as needed)
-#data/
+# Local research data and generated outputs; test samples live in test/fixtures.
+/data/
 logs/
 outputs/
 test/output.txt

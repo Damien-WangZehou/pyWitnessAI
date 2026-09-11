@@ -13,6 +13,9 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from .clip import DEFAULT_CLIP_MODEL
+from .Description import DescriptionParser, ParsedDescription, create_description_parser
+from .Scoring import ScoringResult, ScoringStrategy, create_scoring_strategy
 from .ImageCatalog import (
     CatalogReport,
     ImageCatalog,
@@ -74,6 +77,26 @@ class SelectorQuery:
             raise ValueError("description must not be empty.")
         return cls(positive_texts=(text,), description=text)
 
+    @classmethod
+    def contrastive(
+        cls,
+        positive_texts: Sequence[str] | str,
+        negative_texts: Sequence[str] | str,
+        *,
+        description: str = "",
+    ) -> "SelectorQuery":
+        """Build an explicit positive-minus-negative text query.
+
+        This convenience constructor keeps contrastive queries self-documenting
+        at call sites while retaining the validation performed by ``__post_init__``.
+        """
+        return cls(
+            positive_texts=positive_texts,
+            negative_texts=negative_texts,
+            score_mode="contrastive",
+            description=description,
+        )
+
     @property
     def resolved_score_mode(self) -> Literal["positive", "contrastive"]:
         if self.score_mode == "auto":
@@ -126,7 +149,7 @@ class ClipSelectorBackend(SelectorBackend):
     def __init__(
         self,
         *,
-        model_name: str = "clip-ViT-B-32",
+        model_name: str = DEFAULT_CLIP_MODEL,
         device: str | None = None,
         cache_dir: str | Path | None = None,
         index_dir: str | Path | None = None,
@@ -152,6 +175,9 @@ class ClipSelectorBackend(SelectorBackend):
         self.show_progress = bool(show_progress)
         self.rebuild_index = bool(rebuild_index)
         self.preprocess = preprocess
+        self._encoder = None
+        self._index = None
+        self._index_fingerprint = None
 
     def score(self, manifest: pd.DataFrame, query: SelectorQuery) -> pd.DataFrame:
         prepared = _prepare_clip_manifest(manifest)
@@ -167,22 +193,26 @@ class ClipSelectorBackend(SelectorBackend):
             )
 
         # Lazy imports keep pyWitnessAI importable without optional CLIP dependencies.
-        from .cfd_clip_pilot.clip_backend import SentenceTransformerClipEncoder
-        from .cfd_clip_pilot.index import ClipIndex
+        from .clip import ClipIndex, SentenceTransformerClipEncoder
 
-        encoder = SentenceTransformerClipEncoder(model_name=self.model_name, device=self.device)
+        if self._encoder is None:
+            self._encoder = SentenceTransformerClipEncoder(model_name=self.model_name, device=self.device)
+        encoder = self._encoder
         fingerprint = _embedding_fingerprint(
             prepared,
             model_name=self.model_name,
             preprocess=self.preprocess,
             cache_version=self.CACHE_VERSION,
         )
-        index = self._load_or_build_index(
-            prepared,
-            encoder=encoder,
-            index_class=ClipIndex,
-            fingerprint=fingerprint,
-        )
+        if self._index is None or self._index_fingerprint != fingerprint:
+            self._index = self._load_or_build_index(
+                prepared,
+                encoder=encoder,
+                index_class=ClipIndex,
+                fingerprint=fingerprint,
+            )
+            self._index_fingerprint = fingerprint
+        index = self._index
 
         positive_vectors = encoder.encode_texts(
             query.positive_texts,
@@ -378,6 +408,9 @@ class SelectionResult:
     summary: dict[str, object]
     catalog_report: CatalogReport
     policy: MatchPolicy
+    parsed_description: ParsedDescription | None = None
+    components: pd.DataFrame = field(default_factory=pd.DataFrame)
+    scoring_metadata: dict[str, object] = field(default_factory=dict)
 
     @property
     def matches(self) -> pd.DataFrame:
@@ -404,14 +437,13 @@ class SelectionResult:
         if len(shown) < len(matches):
             print(f"Showing {len(shown)} of {len(matches)} matched faces.")
 
-        from .cfd_clip_pilot.visualization import show_clip_lineup
+        from ._image_display import show_ranked_images
 
         id_column = "target_id" if "target_id" in shown.columns else "image_id"
-        fig = show_clip_lineup(
+        fig = show_ranked_images(
             shown,
             top_k=len(shown),
             cols=cols,
-            target_position="none",
             score_col="selector_score",
             id_col=id_column,
             suptitle=self.query.description,
@@ -447,6 +479,8 @@ class FaceSearch:
         *,
         selector: SelectorLike = "clip",
         selector_kwargs: Mapping[str, object] | None = None,
+        parser: str | DescriptionParser = "raw",
+        scoring: str | ScoringStrategy = "cosine",
     ) -> None:
         self.catalog = (
             catalog
@@ -454,6 +488,8 @@ class FaceSearch:
             else ImageCatalog.from_manifest(catalog, validate_images=False)
         )
         self.selector = create_selector_backend(selector, **dict(selector_kwargs or {}))
+        self.parser = create_description_parser(parser)
+        self.scoring = create_scoring_strategy(scoring)
 
     @classmethod
     def from_folder(
@@ -466,6 +502,8 @@ class FaceSearch:
         validate_images: bool = True,
         selector: SelectorLike = "clip",
         selector_kwargs: Mapping[str, object] | None = None,
+        parser: str | DescriptionParser = "raw",
+        scoring: str | ScoringStrategy = "cosine",
     ) -> "FaceSearch":
         catalog = ImageCatalog.from_folder(
             image_dir,
@@ -474,21 +512,37 @@ class FaceSearch:
             metadata_join=metadata_join,
             validate_images=validate_images,
         )
-        return cls(catalog, selector=selector, selector_kwargs=selector_kwargs)
+        return cls(catalog, selector=selector, selector_kwargs=selector_kwargs, parser=parser, scoring=scoring)
 
     def score(self, description: str | SelectorQuery) -> pd.DataFrame:
-        query = description if isinstance(description, SelectorQuery) else SelectorQuery.from_text(description)
+        return self._evaluate(description)[2]
+
+    def _evaluate(self, description):
         candidates = self.catalog.ready
         if candidates.empty:
             raise ValueError("No valid images are available to score.")
-        raw = self.selector.score(candidates.copy(), query)
-        return normalise_selector_scores(
+        if isinstance(description, SelectorQuery):
+            # Explicit queries already define prompts and their score mode.
+            query, parsed = description, None
+            output = ScoringResult(self.selector.score(candidates.copy(), query))
+        else:
+            parsed = self.parser.parse(description)
+            if not isinstance(parsed, ParsedDescription):
+                raise TypeError("Description parsers must return ParsedDescription.")
+            if not parsed.model_text.strip():
+                raise ValueError("The parser accepted no description text to score.")
+            query = SelectorQuery.from_text(parsed.model_text)
+            output = self.scoring.score(candidates.copy(), parsed, self.selector)
+            if not isinstance(output, ScoringResult):
+                raise TypeError("Scoring strategies must return ScoringResult.")
+        ranked = normalise_selector_scores(
             candidates,
-            raw,
+            output.scores,
             backend_name=self.selector.name,
             model_name=self.selector.model_name,
             require_complete=True,
         )
+        return query, parsed, ranked, output
 
     def select(
         self,
@@ -499,9 +553,8 @@ class FaceSearch:
         min_score: float | None = None,
         ground_truth: GroundTruthSpec | Mapping[str, object] | None = None,
     ) -> SelectionResult:
-        query = description if isinstance(description, SelectorQuery) else SelectorQuery.from_text(description)
         match_policy = _resolve_policy(policy=policy, top_k=top_k, min_score=min_score)
-        ranked = self.score(query)
+        query, parsed, ranked, output = self._evaluate(description)
         ranked["selected"] = match_policy.apply(ranked).astype(bool)
 
         truth_spec = (
@@ -520,6 +573,9 @@ class FaceSearch:
             summary=summary,
             catalog_report=self.catalog.report,
             policy=match_policy,
+            parsed_description=parsed,
+            components=output.components,
+            scoring_metadata=output.metadata,
         )
 
 

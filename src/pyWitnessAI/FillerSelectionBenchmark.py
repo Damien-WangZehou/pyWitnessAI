@@ -3,24 +3,28 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Mapping
 
 import pandas as pd
 
-from .FaceAttributeSchema import DEFAULT_FACE_ATTRIBUTE_SCHEMA, FaceAttributeSchema
+from .clip import DEFAULT_CLIP_MODEL
+from .FaceAttributeSchema import DEFAULT_FACE_ATTRIBUTE_SCHEMA, FaceAttributeSchema, FaceDescriptionSchema
 from .FaceSearch import (
     ClipSelectorBackend,
     SelectorBackend,
     SelectorQuery,
     normalise_selector_scores,
 )
-from .FillerGenerator import FaceDescriptionSchema, FillerGenerator, ImageGenerationBackend
+from .face_generation_backend import ImageGenerationBackend, create_image_generation_backend
 from .GeneratedFaceDataset import DatasetMatchMode, GeneratedFaceDataset
 from .ImageCatalog import discover_images
 
 BenchmarkMode = Literal["single", "ladder"]
+MissingContrastPolicy = Literal["error", "skip"]
+UnusedContrastPolicy = Literal["error", "warn"]
 SelectorCallable = Callable[[pd.DataFrame, str, int], pd.DataFrame]
 
 DEFAULT_DATASET_ROOT = Path("./data/generated_filler_benchmark")
@@ -30,14 +34,10 @@ __all__ = [
     "BenchmarkStage",
     "FillerSelectionBenchmark",
     "FillerSelectorBenchmark",
+    "MissingContrastPolicy",
+    "UnusedContrastPolicy",
 ]
 
-SCHEMA_FEATURE_ORDER = DEFAULT_FACE_ATTRIBUTE_SCHEMA.feature_order
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
-DEFAULT_CONTRASTS = {
-    definition.name: dict(definition.contrasts)
-    for definition in DEFAULT_FACE_ATTRIBUTE_SCHEMA.definitions
-}
 
 
 @dataclass(frozen=True)
@@ -51,6 +51,7 @@ class BenchmarkStage:
     positive_schema: FaceDescriptionSchema
     negative_schema: FaceDescriptionSchema
     stage_dir: Path
+    contrast_source: str = ""
 
     @property
     def stage_name(self) -> str:
@@ -73,7 +74,7 @@ class FillerSelectionBenchmark:
         generator_backend: ImageGenerationBackend | None = None,
         generator_backend_kwargs: Mapping[str, object] | None = None,
         selector: str | SelectorCallable | SelectorBackend = "clip",
-        selector_model: str = "clip-ViT-B-32",
+        selector_model: str = DEFAULT_CLIP_MODEL,
         device: str | None = None,
         image_size: str = "1024x1024",
         image_quality: str = "medium",
@@ -81,7 +82,9 @@ class FillerSelectionBenchmark:
         generate_missing: bool = True,
         overwrite_generated: bool = False,
         dataset_match: DatasetMatchMode = "exact",
-        contrast_overrides: dict[str, str] | None = None,
+        contrast_overrides: Mapping[str | tuple[str, str], str] | None = None,
+        missing_contrast: MissingContrastPolicy = "error",
+        unused_contrast: UnusedContrastPolicy = "error",
         attribute_schema: FaceAttributeSchema | None = None,
     ) -> None:
         if mode not in {"single", "ladder"}:
@@ -90,6 +93,10 @@ class FillerSelectionBenchmark:
             raise ValueError("n must be >= 1.")
         if dataset_match not in {"exact", "contains"}:
             raise ValueError("dataset_match must be 'exact' or 'contains'.")
+        if missing_contrast not in {"error", "skip"}:
+            raise ValueError("missing_contrast must be 'error' or 'skip'.")
+        if unused_contrast not in {"error", "warn"}:
+            raise ValueError("unused_contrast must be 'error' or 'warn'.")
 
         self.verbal_description = verbal_description
         self.n = int(n)
@@ -109,16 +116,38 @@ class FillerSelectionBenchmark:
         self.generate_missing = generate_missing
         self.overwrite_generated = overwrite_generated
         self.dataset_match = dataset_match
-        self.contrast_overrides = contrast_overrides or {}
+        self.contrast_overrides = _normalise_contrast_overrides(contrast_overrides)
+        self.missing_contrast = missing_contrast
+        self.unused_contrast = unused_contrast
         self.attribute_schema = attribute_schema or DEFAULT_FACE_ATTRIBUTE_SCHEMA
         self.dataset = GeneratedFaceDataset(self.dataset_root)
 
-        self.schema = FillerGenerator.parse_description(
-            verbal_description,
-            attribute_schema=self.attribute_schema,
+        self.schema = FaceDescriptionSchema.from_attributes(
+            verbal_description, self.attribute_schema.parse(verbal_description),
         )
-        self.case_slug = _case_slug(verbal_description)
+        self.contrast_configuration = _contrast_configuration(
+            self.attribute_schema,
+            self.contrast_overrides,
+            missing_contrast=self.missing_contrast,
+            unused_contrast=self.unused_contrast,
+        )
+        self.contrast_config_sha256 = hashlib.sha256(
+            json.dumps(
+                self.contrast_configuration,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self.case_slug = f"{_case_slug(verbal_description)}_{self.contrast_config_sha256[:8]}"
         self.stages = self._build_stages()
+        self.run_configuration = _run_configuration(self)
+        self.run_config_sha256 = hashlib.sha256(
+            json.dumps(
+                self.run_configuration,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         self.results_: pd.DataFrame = pd.DataFrame()
         self.summary_: pd.DataFrame = pd.DataFrame()
 
@@ -131,6 +160,16 @@ class FillerSelectionBenchmark:
         if self.mode == "single":
             return self.dataset_root / "single_feature"
         return self.dataset_root / "ladder" / self.case_slug
+
+    @property
+    def result_dir(self) -> Path:
+        """Configuration-isolated output directory for this benchmark run."""
+        return (
+            self.results_root
+            / self.mode
+            / self.case_slug
+            / f"run_{self.run_config_sha256[:8]}"
+        )
 
     def run(
         self,
@@ -200,6 +239,9 @@ class FillerSelectionBenchmark:
                     "feature": stage.feature,
                     "positive_label": stage.positive_label,
                     "negative_label": stage.negative_label,
+                    "contrast_source": stage.contrast_source,
+                    "contrast_config_sha256": self.contrast_config_sha256,
+                    "run_config_sha256": self.run_config_sha256,
                     "positive_filter": _schema_filter_text(stage.positive_schema),
                     "negative_filter": _schema_filter_text(stage.negative_schema),
                     "n_positive_manifest": len(positive),
@@ -265,20 +307,30 @@ class FillerSelectionBenchmark:
             f"  manifest: {self.dataset.manifest_path}",
             f"  dataset_match: {self.dataset_match}",
             f"  attribute_schema: {self.attribute_schema.name}",
+            f"  attribute_schema_version: {self.attribute_schema.version}",
+            f"  contrast_config_sha256: {self.contrast_config_sha256}",
+            f"  run_config_sha256: {self.run_config_sha256}",
+            f"  missing_contrast: {self.missing_contrast}",
+            f"  unused_contrast: {self.unused_contrast}",
             f"  case_slug: {self.case_slug}",
+            f"  result_dir: {self.result_dir}",
             f"  selector: {self.selector}",
             f"  selector_model: {_selector_model_label(self.selector, self.selector_model)}",
             "  stages:",
         ]
         for stage in self.stages:
             lines.append(
-                f"    {stage.stage_name}: {stage.positive_label} vs {stage.negative_label} | {stage.query}"
+                f"    {stage.stage_name}: {stage.positive_label} vs {stage.negative_label} "
+                f"[{stage.contrast_source}] | {stage.query}"
             )
         return "\n".join(lines)
 
     def _build_stages(self) -> list[BenchmarkStage]:
         active_positive = {}
         stages = []
+        missing: list[dict[str, str]] = []
+        resolved: list[dict[str, str]] = []
+        used_override_keys: set[str | tuple[str, str]] = set()
         step = 0
         schema_values = self.schema.attribute_values()
 
@@ -286,9 +338,20 @@ class FillerSelectionBenchmark:
             positive_value = schema_values.get(feature)
             if not positive_value:
                 continue
-            negative_value = self._contrast_for(feature, positive_value)
+            negative_value, contrast_source, override_key = self._contrast_for(
+                feature,
+                positive_value,
+            )
+            if override_key is not None:
+                used_override_keys.add(override_key)
             if not negative_value:
-                print(f"[FillerSelectionBenchmark] Skipping {feature}: no contrast label for {positive_value!r}.")
+                missing.append(
+                    {
+                        "feature": feature,
+                        "positive_label": positive_value,
+                        "reason": "no_explicit_contrast",
+                    }
+                )
                 continue
 
             step += 1
@@ -317,32 +380,101 @@ class FillerSelectionBenchmark:
                     feature=feature,
                     positive_label=positive_value,
                     negative_label=negative_value,
+                    contrast_source=str(contrast_source),
                     query=_schema_query(positive_schema),
                     positive_schema=positive_schema,
                     negative_schema=negative_schema,
                     stage_dir=stage_dir,
                 )
             )
+            resolved.append(
+                {
+                    "feature": feature,
+                    "positive_label": positive_value,
+                    "negative_label": negative_value,
+                    "contrast_source": str(contrast_source),
+                }
+            )
 
+        unused_keys = [
+            key for key in self.contrast_overrides if key not in used_override_keys
+        ]
+        unused_records = [_override_record(key, self.contrast_overrides[key]) for key in unused_keys]
+        self.contrast_audit = {
+            "resolved_contrasts": resolved,
+            "missing_features": missing,
+            "skipped_features": missing if self.missing_contrast == "skip" else [],
+            "unused_overrides": unused_records,
+        }
+
+        errors = []
+        if missing and self.missing_contrast == "error":
+            missing_text = ", ".join(
+                f"{item['feature']}={item['positive_label']!r}" for item in missing
+            )
+            errors.append(
+                "No explicit experimental contrast was configured for: "
+                + missing_text
+                + ". DEFAULT_FACE_ATTRIBUTE_SCHEMA is parsing-only and does not guess negative "
+                "anchors. Pass contrast_overrides, use a custom schema with an explicit contrast, "
+                "or set missing_contrast='skip' to omit those parsed features deliberately."
+            )
+        if unused_records and self.unused_contrast == "error":
+            errors.append(
+                "Unused contrast_overrides were supplied: "
+                + ", ".join(_override_record_text(item) for item in unused_records)
+                + ". Remove misspelled/out-of-scope entries or set unused_contrast='warn' "
+                "to retain and audit a deliberately reusable configuration."
+            )
+        if errors:
+            raise ValueError(" ".join(errors))
+        if missing:
+            print(
+                "[FillerSelectionBenchmark] Explicitly skipping features without contrasts: "
+                + ", ".join(
+                    f"{item['feature']}={item['positive_label']!r}" for item in missing
+                )
+            )
+        if unused_records:
+            warnings.warn(
+                "Unused contrast_overrides were retained for audit: "
+                + ", ".join(_override_record_text(item) for item in unused_records),
+                UserWarning,
+                stacklevel=2,
+            )
         if not stages:
             raise ValueError(
-                "No benchmarkable schema features were parsed from the description. "
-                "Try a more explicit description, e.g. 'a white male with beard and blue eyes'."
+                "No benchmark stages remain because none of the parsed features has an explicit "
+                "experimental contrast. Pass contrast_overrides or a custom schema contrast."
             )
         return stages
 
-    def _contrast_for(self, feature: str, positive_value: str) -> str | None:
-        override = self.contrast_overrides.get(feature)
-        if override:
-            return override
-        if feature == "age":
-            numeric_age = re.search(r"\b(\d{2})\b", str(positive_value))
-            if numeric_age:
-                return "older adult" if int(numeric_age.group(1)) < 50 else "young adult"
-        return self.attribute_schema.contrast_for(
-            feature,
-            positive_value,
-            override=self.contrast_overrides.get(feature),
+    def _contrast_for(
+        self,
+        feature: str,
+        positive_value: str,
+    ) -> tuple[str | None, str | None, str | tuple[str, str] | None]:
+        exact_key = (feature, positive_value)
+        if exact_key in self.contrast_overrides:
+            negative = self.contrast_overrides[exact_key]
+            source = "override:feature+positive"
+            override_key: str | tuple[str, str] | None = exact_key
+        elif feature in self.contrast_overrides:
+            negative = self.contrast_overrides[feature]
+            source = "override:feature"
+            override_key = feature
+        else:
+            negative = self.attribute_schema.contrast_for(feature, positive_value)
+            source = f"schema:{self.attribute_schema.name}" if negative else None
+            override_key = None
+        if negative and str(negative).strip().casefold() == str(positive_value).strip().casefold():
+            raise ValueError(
+                f"Contrast for {feature!r} must differ from positive label {positive_value!r}."
+            )
+        return (
+            (str(negative).strip(), source, override_key)
+            if negative
+            else (None, None, override_key)
         )
 
     def _ensure_stage_dataset(self, stage: BenchmarkStage, generate_missing: bool) -> pd.DataFrame:
@@ -415,18 +547,19 @@ class FillerSelectionBenchmark:
             return
 
         print(f"Generating {missing} {label_role} images for {stage.stage_name} into {self.dataset.images_dir}")
-        self.dataset.generate_fillers(
+        backend = self.generator_backend or create_image_generation_backend(
+            self.generator_provider, self.generator_backend_kwargs,
+        )
+        self.dataset.generate_faces(
             schema,
             verbal_description=_schema_query(schema),
             n=missing,
+            attribute_schema=self.attribute_schema,
             model=self.generator_model,
-            provider=self.generator_provider,
-            backend=self.generator_backend,
-            backend_kwargs=self.generator_backend_kwargs,
+            generator_backend=backend,
             size=self.image_size,
             quality=self.image_quality,
             output_format=self.image_format,
-            overwrite=False,
             source_mode=self.mode,
             source_stage=stage.stage_name,
             source_label_role=label_role,
@@ -435,8 +568,8 @@ class FillerSelectionBenchmark:
     def _import_legacy_stage_folders(self, stage: BenchmarkStage, *, copy_to_images: bool = True) -> list[dict[str, object]]:
         positive_dir = stage.stage_dir / _slug(stage.positive_label)
         negative_dir = stage.stage_dir / _slug(stage.negative_label)
-        positive_paths = _image_files(positive_dir)
-        negative_paths = _image_files(negative_dir)
+        positive_paths = discover_images(positive_dir, recursive=False)
+        negative_paths = discover_images(negative_dir, recursive=False)
         imported_rows: list[dict[str, object]] = []
         if positive_paths:
             imported = self.dataset.import_images(
@@ -482,6 +615,9 @@ class FillerSelectionBenchmark:
                     "stage": stage.stage_name,
                     "step": stage.step,
                     "feature": stage.feature,
+                    "contrast_source": stage.contrast_source,
+                    "contrast_config_sha256": self.contrast_config_sha256,
+                    "run_config_sha256": self.run_config_sha256,
                     "label_role": label_role,
                     "label": label,
                     "is_positive": label_role == "positive",
@@ -533,54 +669,41 @@ class FillerSelectionBenchmark:
         manifest: pd.DataFrame,
         rebuild_index: bool,
     ) -> pd.DataFrame:
-        if isinstance(self.selector, SelectorBackend):
-            raw = self.selector.score(manifest.copy(), SelectorQuery.from_text(stage.query))
-            return normalise_selector_scores(
-                manifest,
-                raw,
-                backend_name=self.selector.name,
-                model_name=self.selector.model_name,
+        backend = self.selector
+        if backend == "clip":
+            index_dir = (
+                self.results_root / "indices"
+                / self.selector_model.replace("/", "_").replace("-", "_")
+                / self.mode / self.case_slug / stage.stage_name
             )
-        if callable(self.selector):
-            raw = self.selector(manifest.copy(), stage.query, len(manifest))
-            raw = _adapt_legacy_selector_results(raw)
-            return normalise_selector_scores(
-                manifest,
-                raw,
-                backend_name="callable",
+            backend = ClipSelectorBackend(
                 model_name=self.selector_model,
+                device=self.device,
+                index_dir=index_dir,
+                show_progress=True,
+                rebuild_index=rebuild_index,
+                preprocess="whole_image",
             )
-        if self.selector != "clip":
+        if isinstance(backend, SelectorBackend):
+            raw = backend.score(manifest.copy(), SelectorQuery.from_text(stage.query))
+        elif callable(backend):
+            raw = backend(manifest.copy(), stage.query, len(manifest))
+            raw = _adapt_legacy_selector_results(raw)
+        else:
             raise ValueError(
                 "selector must be 'clip', a SelectorBackend, or a "
                 "callable(manifest, query, top_k)."
             )
-        return self._run_clip_selector(stage, manifest, rebuild_index=rebuild_index)
-
-    def _run_clip_selector(
-        self,
-        stage: BenchmarkStage,
-        manifest: pd.DataFrame,
-        rebuild_index: bool,
-    ) -> pd.DataFrame:
-        index_dir = self.results_root / "indices" / self.selector_model.replace("/", "_").replace("-", "_") / self.mode / self.case_slug / stage.stage_name
-        backend = ClipSelectorBackend(
-            model_name=self.selector_model,
-            device=self.device,
-            index_dir=index_dir,
-            show_progress=True,
-            rebuild_index=rebuild_index,
-            preprocess="whole_image",
-        )
-        raw = backend.score(manifest.copy(), SelectorQuery.from_text(stage.query))
         return normalise_selector_scores(
             manifest,
             raw,
-            backend_name=backend.name,
-            model_name=backend.model_name,
+            backend_name=_selector_label(backend),
+            model_name=_selector_model_label(backend, self.selector_model),
         )
 
     def _summarise_stage(self, stage: BenchmarkStage, ranked: pd.DataFrame) -> dict[str, object]:
+        label_sources = ranked.get("attribute_label_source", pd.Series(dtype=object)).dropna().astype(str).str.strip()
+        evaluation_label_source = "|".join(sorted(set(label_sources) - {""})) or "unspecified"
         top_k = min(self.n, len(ranked))
         top = ranked.head(top_k)
         positives_in_top_k = int(top["is_positive"].sum())
@@ -594,6 +717,10 @@ class FillerSelectionBenchmark:
             "feature": stage.feature,
             "positive_label": stage.positive_label,
             "negative_label": stage.negative_label,
+            "evaluation_label_source": evaluation_label_source,
+            "contrast_source": stage.contrast_source,
+            "contrast_config_sha256": self.contrast_config_sha256,
+            "run_config_sha256": self.run_config_sha256,
             "query": stage.query,
             "n_positive": int(ranked["is_positive"].sum()),
             "n_negative": int((~ranked["is_positive"]).sum()),
@@ -612,7 +739,7 @@ class FillerSelectionBenchmark:
             return
         try:
             from IPython.display import Markdown, display
-            from .cfd_clip_pilot.visualization import show_clip_lineup
+            from ._image_display import show_ranked_images
         except ImportError:
             print(f"{stage.stage_name}: {summary['positives_in_top_k']} / {summary['top_k']} positives in top-k")
             return
@@ -625,11 +752,10 @@ class FillerSelectionBenchmark:
                 f"Top-{summary['top_k']} positives: **{summary['positives_in_top_k']} / {summary['n_positive']}**"
             )
         )
-        fig = show_clip_lineup(
+        fig = show_ranked_images(
             ranked,
             top_k=int(summary["top_k"]),
             cols=3,
-            target_position="none",
             score_col="selector_score",
             id_col="label",
             suptitle=None,
@@ -646,7 +772,7 @@ class FillerSelectionBenchmark:
     def _write_results(self) -> None:
         if self.results_.empty:
             return
-        output_dir = self.results_root / self.mode / self.case_slug
+        output_dir = self.result_dir
         output_dir.mkdir(parents=True, exist_ok=True)
         self.results_.to_csv(output_dir / "ranked_results.csv", index=False)
         self.summary_.to_csv(output_dir / "summary.csv", index=False)
@@ -662,6 +788,16 @@ class FillerSelectionBenchmark:
             "generator_model": self.generator_model,
             "schema": self.schema.to_dict(),
             "attribute_schema": self.attribute_schema.to_records(),
+            "attribute_schema_name": self.attribute_schema.name,
+            "attribute_schema_version": self.attribute_schema.version,
+            "contrast_configuration": self.contrast_configuration,
+            "contrast_config_sha256": self.contrast_config_sha256,
+            "contrast_audit": self.contrast_audit,
+            "missing_contrast": self.missing_contrast,
+            "unused_contrast": self.unused_contrast,
+            "run_configuration": self.run_configuration,
+            "run_config_sha256": self.run_config_sha256,
+            "result_dir": str(self.result_dir),
         }
         (output_dir / "metadata.json").write_text(
             json.dumps(metadata, indent=2, ensure_ascii=False),
@@ -676,6 +812,132 @@ class FillerSelectionBenchmark:
 
 
 FillerSelectorBenchmark = FillerSelectionBenchmark
+
+
+def _normalise_contrast_overrides(
+    overrides: Mapping[str | tuple[str, str], str] | None,
+) -> dict[str | tuple[str, str], str]:
+    output: dict[str | tuple[str, str], str] = {}
+    for raw_key, raw_negative in dict(overrides or {}).items():
+        negative = str(raw_negative).strip()
+        if not negative:
+            raise ValueError("contrast_overrides values must not be empty.")
+        if isinstance(raw_key, tuple):
+            if len(raw_key) != 2:
+                raise ValueError(
+                    "Tuple contrast_overrides keys must be (feature, positive_value)."
+                )
+            feature = str(raw_key[0]).strip()
+            positive = str(raw_key[1]).strip()
+            if not feature or not positive:
+                raise ValueError("Tuple contrast_overrides keys must not contain empty values.")
+            key: str | tuple[str, str] = (feature, positive)
+        else:
+            feature = str(raw_key).strip()
+            if not feature:
+                raise ValueError("contrast_overrides feature keys must not be empty.")
+            warnings.warn(
+                "Feature-only contrast_overrides are deprecated because they can silently "
+                "carry one negative anchor across different positive values. Use "
+                "(feature, positive_value) tuple keys instead.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            key = feature
+        output[key] = negative
+    return output
+
+
+def _override_record(
+    key: str | tuple[str, str],
+    negative: str,
+) -> dict[str, str | None]:
+    if isinstance(key, tuple):
+        feature, positive = key
+        scope = "feature+positive"
+    else:
+        feature, positive = key, None
+        scope = "feature"
+    return {
+        "scope": scope,
+        "feature": feature,
+        "positive_label": positive,
+        "negative_label": negative,
+    }
+
+
+def _override_record_text(record: Mapping[str, object]) -> str:
+    positive = record.get("positive_label")
+    if positive is None:
+        return f"{record.get('feature')} -> {record.get('negative_label')!r}"
+    return (
+        f"({record.get('feature')}, {positive!r}) -> "
+        f"{record.get('negative_label')!r}"
+    )
+
+
+def _contrast_configuration(
+    schema: FaceAttributeSchema,
+    overrides: Mapping[str | tuple[str, str], str],
+    *,
+    missing_contrast: MissingContrastPolicy,
+    unused_contrast: UnusedContrastPolicy,
+) -> dict[str, object]:
+    override_records = [_override_record(key, negative) for key, negative in overrides.items()]
+    override_records.sort(
+        key=lambda item: (
+            str(item["feature"]),
+            str(item["positive_label"] or ""),
+            str(item["negative_label"]),
+        )
+    )
+    schema_contrasts = {
+        definition.name: dict(definition.contrasts)
+        for definition in schema.definitions
+        if definition.contrasts
+    }
+    return {
+        "attribute_schema_name": schema.name,
+        "attribute_schema_version": schema.version,
+        "attribute_schema_definitions": schema.to_records(),
+        "schema_contrasts": schema_contrasts,
+        "overrides": override_records,
+        "missing_contrast": missing_contrast,
+        "unused_contrast": unused_contrast,
+    }
+
+
+def _run_configuration(benchmark: "FillerSelectionBenchmark") -> dict[str, object]:
+    return {
+        "contrast_config_sha256": benchmark.contrast_config_sha256,
+        "mode": benchmark.mode,
+        "n_per_label": benchmark.n,
+        "dataset_match": benchmark.dataset_match,
+        "selector": _selector_label(benchmark.selector),
+        "selector_identity": _component_identity(benchmark.selector),
+        "selector_model": _selector_model_label(
+            benchmark.selector,
+            benchmark.selector_model,
+        ),
+        "device": benchmark.device,
+        "generator_provider": benchmark.generator_provider,
+        "generator_identity": _component_identity(benchmark.generator_backend),
+        "generator_model": benchmark.generator_model,
+        "image_size": benchmark.image_size,
+        "image_quality": benchmark.image_quality,
+        "image_format": benchmark.image_format,
+    }
+
+
+def _component_identity(component: object) -> str:
+    if component is None:
+        return ""
+    target = component if isinstance(component, type) else type(component)
+    if callable(component) and not isinstance(component, SelectorBackend):
+        target = component
+    module = getattr(target, "__module__", "")
+    qualname = getattr(target, "__qualname__", getattr(target, "__name__", ""))
+    return f"{module}.{qualname}".strip(".")
 
 
 def _schema_from_fields(original_description: str, fields: dict[str, str]) -> FaceDescriptionSchema:
@@ -738,7 +1000,3 @@ def _case_slug(text: str) -> str:
     base = _slug(text)[:48]
     digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
     return f"{base}_{digest}"
-
-
-def _image_files(folder: Path) -> list[Path]:
-    return discover_images(folder, recursive=False, extensions=IMAGE_EXTENSIONS)

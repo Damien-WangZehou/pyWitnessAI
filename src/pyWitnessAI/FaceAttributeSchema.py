@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import random
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from types import MappingProxyType
 from typing import Callable, Iterable, Literal, Mapping, Sequence
 
@@ -12,7 +13,172 @@ __all__ = [
     "DEFAULT_FACE_ATTRIBUTE_SCHEMA",
     "FaceAttributeDefinition",
     "FaceAttributeSchema",
+    "FaceDescriptionSchema",
+    "LEGACY_FACE_ATTRIBUTE_SCHEMA_V1",
 ]
+
+
+@dataclass(frozen=True)
+class FaceDescriptionSchema:
+    """Structured facial-description fields used to build generation prompts."""
+
+    original_description: str
+    gender: str | None = None
+    race: str | None = None
+    age: str | None = None
+    hair: str | None = None
+    facial_hair: str | None = None
+    eyes: str | None = None
+    eyebrows: str | None = None
+    nose: str | None = None
+    build: str | None = None
+    face_shape: str | None = None
+    forehead: str | None = None
+    mouth: str | None = None
+    ears: str | None = None
+    jaw: str | None = None
+    teeth: str | None = None
+    expression: str | None = None
+    clothing: str | None = None
+    accessories: str | None = None
+    other_details: tuple[str, ...] = field(default_factory=tuple)
+    hair_color: str | None = None
+    hair_texture: str | None = None
+    eyebrow_color: str | None = None
+    custom_attributes: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+
+    @classmethod
+    def from_attributes(
+        cls,
+        original_description: str,
+        attributes: Mapping[str, str],
+        *,
+        other_details: tuple[str, ...] = (),
+    ) -> "FaceDescriptionSchema":
+        field_names = {item.name for item in fields(cls)}
+        known = {
+            key: value
+            for key, value in attributes.items()
+            if key in field_names and key not in {"original_description", "custom_attributes", "other_details"}
+        }
+        custom = tuple(
+            sorted(
+                (str(key), str(value))
+                for key, value in attributes.items()
+                if value and key not in known
+            )
+        )
+        return cls(
+            original_description=original_description,
+            custom_attributes=custom,
+            other_details=tuple(other_details),
+            **known,
+        )
+
+    def attribute_values(self) -> dict[str, str]:
+        excluded = {"original_description", "custom_attributes", "other_details"}
+        values = {
+            item.name: str(getattr(self, item.name))
+            for item in fields(self)
+            if item.name not in excluded and getattr(self, item.name)
+        }
+        values.update({str(key): str(value) for key, value in self.custom_attributes if value})
+        return values
+
+    def with_attributes(self, attributes: Mapping[str, str]) -> "FaceDescriptionSchema":
+        values = self.attribute_values()
+        values.update({str(key): str(value) for key, value in attributes.items() if value})
+        return self.from_attributes(
+            self.original_description,
+            values,
+            other_details=self.other_details,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        values: dict[str, object] = {
+            "original_description": self.original_description,
+            **self.attribute_values(),
+        }
+        if self.other_details:
+            values["other_details"] = list(self.other_details)
+        return values
+
+    def subject_phrase(self) -> str:
+        subject_terms = []
+        if self.age:
+            subject_terms.append(self.age)
+        if self.race:
+            subject_terms.append(self.race)
+        if self.gender:
+            subject_terms.append(self.gender)
+        subject_terms.append("person" if self.age and "adult" in self.age.lower() else "adult person")
+        return " ".join(subject_terms)
+
+    def detail_phrases(self) -> list[str]:
+        hair = _combine_attribute_labels(
+            (self.hair, self.hair_texture, self.hair_color),
+            noun="hair",
+        )
+        eyebrows = _combine_attribute_labels(
+            (self.eyebrow_color, self.eyebrows),
+            noun="eyebrows",
+        )
+        detail_fields = [
+            hair,
+            self.facial_hair,
+            self.eyes,
+            eyebrows,
+            self.nose,
+            self.build,
+            self.face_shape,
+            self.forehead,
+            self.mouth,
+            self.ears,
+            self.jaw,
+            self.teeth,
+            self.expression,
+            self.clothing,
+            self.accessories,
+        ]
+        custom = [value for _, value in self.custom_attributes]
+        return [text for text in detail_fields if text] + custom + list(self.other_details)
+
+    def to_generation_prompt(self, variation: str | None = None) -> str:
+        details = self.detail_phrases()
+        if variation:
+            details.append(variation)
+
+        prompt = (
+            "Photorealistic synthetic fictional adult face portrait, "
+            f"{self.subject_phrase()}"
+        )
+        if details:
+            prompt += " with " + ", ".join(details)
+        prompt += (
+            ", frontal face, centered crop, shoulders visible, plain light gray studio background, "
+            "even soft lighting, neutral camera angle, realistic skin texture, high detail, "
+            "not a real person, not a celebrity."
+        )
+        return prompt
+
+
+def _combine_attribute_labels(values: tuple[str | None, ...], *, noun: str) -> str | None:
+    labels = [value for value in values if value]
+    if not labels:
+        return None
+    if len(labels) == 1:
+        return labels[0]
+    if "bald head" in labels:
+        return "bald head"
+
+    stems = []
+    for label in labels:
+        stem = re.sub(rf"\s+{re.escape(noun)}$", "", label, flags=re.IGNORECASE)
+        if stem == "visible" and len(labels) > 1:
+            continue
+        if stem and stem not in stems:
+            stems.append(stem)
+    return f"{' '.join(stems)} {noun}" if stems else labels[0]
 
 
 @dataclass(frozen=True)
@@ -25,6 +191,7 @@ class FaceAttributeDefinition:
     contrasts: Mapping[str, str] = field(default_factory=dict)
     parser: AttributeParser | None = field(default=None, repr=False, compare=False)
     prompt_role: PromptRole = "detail"
+    sample_values: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         name = _attribute_name(self.name)
@@ -35,6 +202,12 @@ class FaceAttributeDefinition:
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "patterns", tuple(self.patterns))
         object.__setattr__(self, "contrasts", MappingProxyType(dict(self.contrasts)))
+        choices = tuple(self.sample_values)
+        if any(not isinstance(value, str) or not value.strip() for value in choices):
+            raise ValueError("sample_values must contain non-empty strings.")
+        if len(choices) != len(set(choices)):
+            raise ValueError("sample_values must be unique.")
+        object.__setattr__(self, "sample_values", choices)
 
     def parse(self, normalised_description: str) -> str | None:
         if self.parser is not None:
@@ -53,6 +226,7 @@ class FaceAttributeSchema:
         definitions: Iterable[FaceAttributeDefinition],
         *,
         name: str = "face_attributes",
+        version: str = "1.0.0",
     ) -> None:
         ordered = tuple(sorted(definitions, key=lambda item: (item.order, item.name)))
         names = [definition.name for definition in ordered]
@@ -60,6 +234,7 @@ class FaceAttributeSchema:
         if duplicates:
             raise ValueError(f"Duplicate attribute definitions: {duplicates}")
         self.name = str(name).strip() or "face_attributes"
+        self.version = str(version).strip() or "1.0.0"
         self._definitions = ordered
         self._by_name = MappingProxyType({definition.name: definition for definition in ordered})
 
@@ -89,6 +264,22 @@ class FaceAttributeSchema:
                 values[definition.name] = value
         return values
 
+    def sample(self, *, rng: random.Random | None = None) -> dict[str, str]:
+        """Sample only declared values; omitted fields receive no invented value.
+
+        Reuse a seeded Random instance to produce a reproducible batch. Hair
+        colour and texture are omitted when the sampled head is bald.
+        """
+        rng = rng if rng is not None else random.Random()
+        values = {
+            definition.name: rng.choice(definition.sample_values)
+            for definition in self._definitions if definition.sample_values
+        }
+        if values.get("hair") == "bald head":
+            values.pop("hair_color", None)
+            values.pop("hair_texture", None)
+        return values
+
     def contrast_for(
         self,
         name: str,
@@ -107,6 +298,7 @@ class FaceAttributeSchema:
         *,
         replace: bool = False,
         name: str | None = None,
+        version: str | None = None,
     ) -> "FaceAttributeSchema":
         if isinstance(definitions, FaceAttributeDefinition):
             additions = (definitions,)
@@ -120,7 +312,11 @@ class FaceAttributeSchema:
                     f"Attribute {definition.name!r} already exists; pass replace=True to replace it."
                 )
             merged[definition.name] = definition
-        return FaceAttributeSchema(merged.values(), name=name or self.name)
+        return FaceAttributeSchema(
+            merged.values(),
+            name=name or self.name,
+            version=version or self.version,
+        )
 
     def to_records(self) -> list[dict[str, object]]:
         return [
@@ -128,7 +324,14 @@ class FaceAttributeSchema:
                 "name": definition.name,
                 "order": definition.order,
                 "prompt_role": definition.prompt_role,
+                "patterns": list(definition.patterns),
+                "parser": (
+                    getattr(definition.parser, "__qualname__", None)
+                    if definition.parser is not None
+                    else None
+                ),
                 "contrasts": dict(definition.contrasts),
+                **({"sample_values": list(definition.sample_values)} if definition.sample_values else {}),
             }
             for definition in self._definitions
         ]
@@ -137,7 +340,10 @@ class FaceAttributeSchema:
         return isinstance(name, str) and _attribute_name(name) in self._by_name
 
     def __repr__(self) -> str:
-        return f"FaceAttributeSchema(name={self.name!r}, features={self.feature_order!r})"
+        return (
+            f"FaceAttributeSchema(name={self.name!r}, version={self.version!r}, "
+            f"features={self.feature_order!r})"
+        )
 
 
 def _normalise_text(text: str) -> str:
@@ -148,26 +354,166 @@ def _attribute_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
 
 
-def _first_match(text: str, patterns: Sequence[tuple[str, str]]) -> str | None:
+_UNCERTAINTY_CUE_RE = re.compile(
+    r"\b(?:maybe|perhaps|possibly|probably|may|might|not sure|unsure|uncertain|unclear|"
+    r"i (?:think|believe|guess)|(?:hard|difficult|unable) to (?:tell|see|remember|recall)|"
+    r"could (?:be|have)|"
+    r"can(?:not|'t) (?:tell|see|say|remember|recall|make out|be (?:sure|certain))|"
+    r"could(?: not|n't) (?:tell|see|say|remember|recall|make out))\b",
+    re.IGNORECASE,
+)
+_NEGATION_CUE_RE = re.compile(
+    r"\b(?:no|not|never|neither|without|cannot|"
+    r"(?:do|does|did|is|are|was|were|has|have|had|can|could|would|should)n['’]?t)\b",
+    re.IGNORECASE,
+)
+_NON_PREFIX_RE = re.compile(r"\bnon\s*[-–— ]\s*$", re.IGNORECASE)
+_SCOPE_BOUNDARY_RE = re.compile(r"[,;:.!?]|\b(?:but|however)\b", re.IGNORECASE)
+_POSTPOSED_UNCERTAINTY_RE = re.compile(
+    r"^\s*,?\s*(?:maybe|perhaps|possibly|probably|i (?:think|believe|guess))"
+    r"(?=\s*(?:[,;:.!?]|$))",
+    re.IGNORECASE,
+)
+_DISJUNCTION_CUE_RE = re.compile(
+    r"\b(?:either|or)\b|(?<=[a-z])\s*/\s*(?=[a-z])",
+    re.IGNORECASE,
+)
+
+
+def _scope_prefix(text: str, start: int) -> str:
+    prefix = text[:start]
+    boundary = 0
+    for match in _SCOPE_BOUNDARY_RE.finditer(prefix):
+        boundary = match.end()
+    return prefix[boundary:]
+
+
+def _scope_segment(text: str, start: int, end: int) -> str:
+    """Return the punctuation/contrast-delimited segment containing a match."""
+    left = start - len(_scope_prefix(text, start))
+    following = _SCOPE_BOUNDARY_RE.search(text, end)
+    right = following.start() if following is not None else len(text)
+    return text[left:right]
+
+
+def _match_has_asserted_polarity(text: str, match: re.Match[str]) -> bool:
+    """Check local polarity without treating alternatives as assertions."""
+    prefix = _scope_prefix(text, match.start())
+    return not (
+        _UNCERTAINTY_CUE_RE.search(prefix)
+        or _NEGATION_CUE_RE.search(prefix)
+        or _NON_PREFIX_RE.search(prefix)
+        or _POSTPOSED_UNCERTAINTY_RE.search(text[match.end() :])
+    )
+
+
+def _match_is_disjunctive(text: str, match: re.Match[str]) -> bool:
+    segment = _scope_segment(text, match.start(), match.end())
+    # ``y/o`` is an age-unit abbreviation, not an alternative construction.
+    segment = re.sub(r"\by\s*/\s*o\b", "", segment, flags=re.IGNORECASE)
+    return bool(_DISJUNCTION_CUE_RE.search(segment))
+
+
+def _match_is_asserted(text: str, match: re.Match[str]) -> bool:
+    """Reject locally negated, uncertain, or alternative matches."""
+    return _match_has_asserted_polarity(text, match) and not _match_is_disjunctive(
+        text, match
+    )
+
+
+def _matched_values(
+    text: str,
+    patterns: Sequence[tuple[str, str]],
+) -> list[str]:
+    matches: list[tuple[int, str]] = []
     for pattern, value in patterns:
-        if re.search(pattern, text):
-            return value
-    return None
+        for match in re.finditer(pattern, text):
+            if _match_is_asserted(text, match):
+                matches.append((match.start(), value))
+    matches.sort(key=lambda item: item[0])
+    return list(dict.fromkeys(value for _, value in matches))
+
+
+def _first_match(text: str, patterns: Sequence[tuple[str, str]]) -> str | None:
+    """Return one unambiguous asserted value; conflicting values abstain."""
+    values = _matched_values(text, patterns)
+    return values[0] if len(values) == 1 else None
 
 
 def _parse_age(text: str) -> str | None:
-    match = re.search(r"\b(?:around|about)?\s*(\d{2})\s*(?:years?\s*old|yo)?\b", text)
-    if match:
-        age = int(match.group(1))
-        if age < 18:
-            raise ValueError("FillerGenerator only supports synthetic adult faces; age must be 18 or older.")
+    numeric_matches: list[tuple[int, int]] = []
+    coordinated = False
+
+    # Capture a shared unit in constructions such as ``16 or 30 years old``
+    # so that the first value cannot evade the adult-only guard.
+    age_separator = r"(?:or|and|to|[-–—/])"
+    shared_unit = re.compile(
+        rf"\b(\d{{1,3}})\s*{age_separator}\s*(\d{{1,3}})"
+        r"(?:\s+years?\s+old|[- ]year[- ]old|\s+y/?o)\b"
+    )
+    for match in shared_unit.finditer(text):
+        if not _match_has_asserted_polarity(text, match):
+            continue
+        coordinated = True
+        numeric_matches.extend(
+            (match.start(index), int(match.group(index))) for index in (1, 2)
+        )
+
+    shared_aged_prefix = re.compile(
+        rf"\b(?:age|aged)\s+(?:between\s+)?(\d{{1,3}})\s*"
+        rf"{age_separator}\s*(\d{{1,3}})\b"
+    )
+    for match in shared_aged_prefix.finditer(text):
+        if not _match_has_asserted_polarity(text, match):
+            continue
+        coordinated = True
+        numeric_matches.extend(
+            (match.start(index), int(match.group(index))) for index in (1, 2)
+        )
+
+    for pattern in (
+        r"\b(?:age|aged)\s+(\d{1,3})\b",
+        r"\b(?:around|about|approximately|roughly)?\s*(\d{1,3})"
+        r"(?:\s+years?\s+old|[- ]year[- ]old|\s+y/?o)\b",
+    ):
+        for match in re.finditer(pattern, text):
+            if not _match_has_asserted_polarity(text, match):
+                continue
+            coordinated = coordinated or _match_is_disjunctive(text, match)
+            numeric_matches.append((match.start(1), int(match.group(1))))
+
+    # Validate every asserted explicit age before conflict or coordination can
+    # cause abstention.  An underage value must never be hidden by an adult one.
+    for _, age in numeric_matches:
+        if not 18 <= age <= 120:
+            raise ValueError(
+                "The default synthetic-face schema supports adult ages 18 through 120."
+            )
+
+    ages = list(dict.fromkeys(age for _, age in sorted(numeric_matches)))
+    if coordinated or len(ages) > 1:
+        return None
+    if ages:
+        age = ages[0]
         return f"around {age} years old"
     return _first_match(
         text,
         (
-            (r"\byoung(?:\s+adult)?\b", "young adult"),
-            (r"\bmiddle[- ]aged(?:\s+adult)?\b", "middle-aged adult"),
-            (r"\b(?:old|older)(?:\s+adult)?\b", "older adult"),
+            (
+                r"\byoung(?:\s+\w+){0,2}\s+"
+                r"(?:adult|person|man|woman|male|female|guy|dude|gentleman|lady)\b",
+                "young adult",
+            ),
+            (
+                r"\bmiddle[- ]aged(?:\s+\w+){0,2}\s+"
+                r"(?:adult|person|man|woman|male|female|guy|dude|gentleman|lady)\b",
+                "middle-aged adult",
+            ),
+            (
+                r"\b(?:old|older)(?:\s+\w+){0,2}\s+"
+                r"(?:adult|person|man|woman|male|female|guy|dude|gentleman|lady)\b",
+                "older adult",
+            ),
         ),
     )
 
@@ -176,16 +522,14 @@ _HAIR_MODIFIERS = r"(?:curly|wavy|straight|black|brown|blond|blonde|gray|grey|re
 
 
 def _parse_hair_length(text: str) -> str | None:
-    if re.search(r"\bbald(?:\s+head)?\b", text):
-        return "bald head"
+    patterns: list[tuple[str, str]] = [(r"\bbald(?:\s+head)?\b", "bald head")]
     for length, label in (
         ("long", "long hair"),
         ("short", "short hair"),
         (r"medium[- ]length", "medium-length hair"),
     ):
-        if re.search(rf"\b{length}(?:\s+{_HAIR_MODIFIERS})*\s+hair\b", text):
-            return label
-    return "visible hair" if re.search(r"\bhair\b", text) else None
+        patterns.append((rf"\b{length}(?:\s+{_HAIR_MODIFIERS})*\s+hair\b", label))
+    return _first_match(text, tuple(patterns))
 
 
 def _parse_hair_color(text: str) -> str | None:
@@ -198,27 +542,35 @@ def _parse_hair_color(text: str) -> str | None:
         ("dark", "dark hair"),
         ("light", "light hair"),
     )
+    patterns: list[tuple[str, str]] = []
     for color, label in colors:
-        if re.search(
-            rf"\b{color}(?:\s+(?:long|short|medium[- ]length|curly|wavy|straight))*\s+hair\b",
-            text,
-        ):
-            return label
-        if re.search(
-            rf"\b(?:long|short|medium[- ]length|curly|wavy|straight)(?:\s+(?:long|short|medium[- ]length|curly|wavy|straight))*\s+{color}\s+hair\b",
-            text,
-        ):
-            return label
-    return None
+        patterns.extend(
+            (
+                (
+                    rf"\b{color}(?:\s+(?:long|short|medium[- ]length|curly|wavy|straight))*\s+hair\b",
+                    label,
+                ),
+                (
+                    rf"\b(?:long|short|medium[- ]length|curly|wavy|straight)"
+                    rf"(?:\s+(?:long|short|medium[- ]length|curly|wavy|straight))*\s+{color}\s+hair\b",
+                    label,
+                ),
+            )
+        )
+    values = _matched_values(text, tuple(patterns))
+    named = [value for value in values if value not in {"dark hair", "light hair"}]
+    selected = named or values
+    return selected[0] if len(selected) == 1 else None
 
 
 def _parse_hair_texture(text: str) -> str | None:
+    bridge = r"(?:long|short|medium[- ]length|black|brown|blond|blonde|gr[ae]y|red|dark|light)"
     return _first_match(
         text,
         (
-            (r"\bcurly(?:\s+\w+){0,3}\s+hair\b", "curly hair"),
-            (r"\bwavy(?:\s+\w+){0,3}\s+hair\b", "wavy hair"),
-            (r"\bstraight(?:\s+\w+){0,3}\s+hair\b", "straight hair"),
+            (rf"\bcurly(?:\s+{bridge}){{0,3}}\s+hair\b", "curly hair"),
+            (rf"\bwavy(?:\s+{bridge}){{0,3}}\s+hair\b", "wavy hair"),
+            (rf"\bstraight(?:\s+{bridge}){{0,3}}\s+hair\b", "straight hair"),
         ),
     )
 
@@ -227,9 +579,11 @@ def _parse_facial_hair(text: str) -> str | None:
     return _first_match(
         text,
         (
-            (r"\b(no beard|no facial hair|clean[- ]shaven|clean shaven)\b", "no facial hair"),
-            (r"\b(full beard|big beard|thick beard)\b", "full beard"),
-            (r"\bbeard(?:ed)?\b", "beard"),
+            (r"\b(no facial hair|clean[- ]shaven|clean shaven)\b", "no facial hair"),
+            (r"\bfull beard\b", "full beard"),
+            (r"\bbig beard\b", "big beard"),
+            (r"\bthick beard\b", "thick beard"),
+            (r"(?<!full )(?<!big )(?<!thick )\bbeard(?:ed)?\b", "beard"),
             (r"\b(?:moustache|mustache)\b", "mustache"),
             (r"\bstubble\b", "stubble"),
         ),
@@ -238,6 +592,7 @@ def _parse_facial_hair(text: str) -> str | None:
 
 def _parse_eyebrow_color(text: str) -> str | None:
     modifiers = r"(?:bushy|thick|thin|fine|arched|straight)"
+    patterns: list[tuple[str, str]] = []
     for color, label in (
         ("brown", "brown eyebrows"),
         ("black", "black eyebrows"),
@@ -245,14 +600,127 @@ def _parse_eyebrow_color(text: str) -> str | None:
         (r"gr[ae]y", "gray eyebrows"),
         ("red", "red eyebrows"),
     ):
-        if re.search(rf"\b{color}(?:\s+{modifiers})*\s+eyebrows?\b", text):
-            return label
-        if re.search(rf"\b{modifiers}(?:\s+{modifiers})*\s+{color}\s+eyebrows?\b", text):
-            return label
-    return None
+        patterns.extend(
+            (
+                (rf"\b{color}(?:\s+{modifiers})*\s+eyebrows?\b", label),
+                (rf"\b{modifiers}(?:\s+{modifiers})*\s+{color}\s+eyebrows?\b", label),
+            )
+        )
+    return _first_match(text, tuple(patterns))
 
 
-DEFAULT_FACE_ATTRIBUTE_SCHEMA = FaceAttributeSchema(
+def _parse_modifier_sequence(
+    text: str,
+    *,
+    head: str,
+    aliases: Sequence[tuple[str, str]],
+) -> str | None:
+    alias_pattern = "(?:" + "|".join(alias for alias, _ in aliases) + ")"
+    sequence = re.compile(
+        rf"\b(?P<modifiers>{alias_pattern}"
+        rf"(?:\s*(?:,|and)?\s*{alias_pattern})*)\s+{head}\b"
+    )
+    found: list[str] = []
+    for match in sequence.finditer(text):
+        if not _match_is_asserted(text, match):
+            continue
+        modifiers = match.group("modifiers")
+        for alias, value in aliases:
+            if re.search(rf"\b(?:{alias})\b", modifiers):
+                found.append(value)
+    values = list(dict.fromkeys(found))
+    return values[0] if len(values) == 1 else None
+
+
+def _parse_eyebrows(text: str) -> str | None:
+    return _parse_modifier_sequence(
+        text,
+        head=r"eyebrows?",
+        aliases=(
+            (r"bushy", "bushy eyebrows"),
+            (r"thick", "thick eyebrows"),
+            (r"thin|fine", "thin eyebrows"),
+            (r"arched", "arched eyebrows"),
+            (r"straight", "straight eyebrows"),
+        ),
+    )
+
+
+def _parse_nose(text: str) -> str | None:
+    return _parse_modifier_sequence(
+        text,
+        head="nose",
+        aliases=(
+            (r"hawk", "hawk nose"),
+            (r"aquiline", "aquiline nose"),
+            (r"roman", "Roman nose"),
+            (r"broad|wide", "broad nose"),
+            (r"narrow|thin", "narrow nose"),
+            (r"big|large", "large nose"),
+            (r"small", "small nose"),
+            (r"long", "long nose"),
+            (r"short", "short nose"),
+            (r"straight", "straight nose"),
+            (r"pointed|pointy", "pointed nose"),
+        ),
+    )
+
+
+def _parse_race(text: str) -> str | None:
+    """Parse an explicitly person-bound demographic descriptor only."""
+    subject = r"(?:adult|person|man|woman|male|female|dude|guy|gentleman|lady)"
+    descriptors = (
+        (r"east asian", "East Asian"),
+        (r"south asian", "South Asian"),
+        (r"(?<!east )(?<!south )asian", "Asian"),
+        (r"white", "White"),
+        (r"caucasian", "Caucasian"),
+        (r"black", "Black"),
+        (r"african american", "African American"),
+        (r"latino|latina", "Latino"),
+        (r"hispanic", "Hispanic"),
+        (r"indian", "Indian"),
+        (r"middle eastern", "Middle Eastern"),
+        (r"arab", "Arab"),
+    )
+    patterns: list[tuple[str, str]] = []
+    for descriptor, value in descriptors:
+        patterns.extend(
+            (
+                (rf"\b(?:{descriptor})\s+(?:adult\s+)?{subject}\b", value),
+                (
+                    rf"\b{subject}\s+(?:who\s+)?(?:was|is|appeared)?\s*(?:{descriptor})\b",
+                    value,
+                ),
+            )
+        )
+    return _first_match(text, tuple(patterns))
+
+
+def _parse_expression(text: str) -> str | None:
+    """Parse emotions only when wording describes a visible expression."""
+    patterns: list[tuple[str, str]] = [
+        (r"\bopen[- ]mouth\s+smile\b", "open-mouth smile"),
+        (r"\bclosed[- ]mouth\s+smile\b", "closed-mouth smile"),
+        (r"(?<!mouth )\bsmil(?:e|ing)\b", "smiling expression"),
+        (r"\bneutral\s+expression\b", "neutral expression"),
+    ]
+    for emotion in ("angry", "sad", "surprised"):
+        label = f"{emotion} expression"
+        patterns.extend(
+            (
+                (rf"\b{emotion}(?:[- ]looking)?\s+(?:expression|look|face)\b", label),
+                (rf"\b(?:looked|appeared|seemed)\s+{emotion}\b", label),
+                (
+                    rf"\b(?:expression|face|look)\s+(?:was|is|looked|appeared|seemed)\s+{emotion}\b",
+                    label,
+                ),
+            )
+        )
+    return _first_match(text, tuple(patterns))
+
+
+LEGACY_FACE_ATTRIBUTE_SCHEMA_V1 = FaceAttributeSchema(
     (
         FaceAttributeDefinition(
             "gender",
@@ -356,13 +824,7 @@ DEFAULT_FACE_ATTRIBUTE_SCHEMA = FaceAttributeSchema(
         FaceAttributeDefinition(
             "eyebrows",
             60,
-            patterns=(
-                (r"\bbushy\s+eyebrows?\b", "bushy eyebrows"),
-                (r"\bthick\s+eyebrows?\b", "thick eyebrows"),
-                (r"\b(?:thin|fine)\s+eyebrows?\b", "thin eyebrows"),
-                (r"\barched\s+eyebrows?\b", "arched eyebrows"),
-                (r"\bstraight\s+eyebrows?\b", "straight eyebrows"),
-            ),
+            parser=_parse_eyebrows,
             contrasts={
                 "bushy eyebrows": "thin eyebrows",
                 "thick eyebrows": "thin eyebrows",
@@ -374,16 +836,7 @@ DEFAULT_FACE_ATTRIBUTE_SCHEMA = FaceAttributeSchema(
         FaceAttributeDefinition(
             "nose",
             70,
-            patterns=(
-                (r"\b(?:hawk|aquiline|roman)\s+nose\b", "hawk nose"),
-                (r"\b(?:broad|wide)\s+nose\b", "broad nose"),
-                (r"\b(?:narrow|thin)\s+nose\b", "narrow nose"),
-                (r"\b(?:big|large)\s+nose\b", "large nose"),
-                (r"\bsmall\s+nose\b", "small nose"),
-                (r"\blong\s+nose\b", "long nose"),
-                (r"\bshort\s+nose\b", "short nose"),
-                (r"\bstraight\s+nose\b", "straight nose"),
-            ),
+            parser=_parse_nose,
             contrasts={
                 "hawk nose": "straight nose",
                 "broad nose": "narrow nose",
@@ -399,7 +852,9 @@ DEFAULT_FACE_ATTRIBUTE_SCHEMA = FaceAttributeSchema(
             "build",
             80,
             patterns=(
-                (r"\b(?:broad|heavy|stocky)\s+build\b", "broad build"),
+                (r"\bbroad\s+build\b", "broad build"),
+                (r"\bheavy\s+build\b", "heavy build"),
+                (r"\bstocky\s+build\b", "stocky build"),
                 (r"\b(?:slim|thin|slender|skinny)\s+build\b", "slim build"),
             ),
             contrasts={"broad build": "slim build", "slim build": "broad build"},
@@ -410,7 +865,8 @@ DEFAULT_FACE_ATTRIBUTE_SCHEMA = FaceAttributeSchema(
             patterns=(
                 (r"\bround\s+face\b", "round face"),
                 (r"\boval\s+face\b", "oval face"),
-                (r"\b(?:narrow|long)\s+face\b", "narrow face"),
+                (r"\bnarrow\s+face\b", "narrow face"),
+                (r"\blong\s+face\b", "long face"),
                 (r"\bsquare\s+face\b", "square face"),
             ),
             contrasts={
@@ -423,14 +879,7 @@ DEFAULT_FACE_ATTRIBUTE_SCHEMA = FaceAttributeSchema(
         FaceAttributeDefinition(
             "race",
             100,
-            patterns=(
-                (r"\b(?:white|caucasian)\b", "White"),
-                (r"\b(?:asian|east asian|south asian)\b", "Asian"),
-                (r"\b(?:black|african)\b", "Black"),
-                (r"\b(?:latino|latina|hispanic)\b", "Latino"),
-                (r"\bindian\b", "Indian"),
-                (r"\b(?:middle eastern|arab)\b", "Middle Eastern"),
-            ),
+            parser=_parse_race,
             contrasts={
                 "White": "Asian",
                 "Asian": "White",
@@ -461,7 +910,8 @@ DEFAULT_FACE_ATTRIBUTE_SCHEMA = FaceAttributeSchema(
             "ears",
             130,
             patterns=(
-                (r"\b(?:protrude|protruding|prominent)\s+ears?\b", "protruding ears"),
+                (r"\b(?:protrude|protruding)\s+ears?\b", "protruding ears"),
+                (r"\bprominent\s+ears?\b", "prominent ears"),
                 (r"\bvisible\s+ears?\b", "visible ears"),
                 (r"\b(?:covered|hidden)\s+ears?\b", "covered ears"),
             ),
@@ -497,15 +947,7 @@ DEFAULT_FACE_ATTRIBUTE_SCHEMA = FaceAttributeSchema(
         FaceAttributeDefinition(
             "expression",
             160,
-            patterns=(
-                (r"\bopen[- ]mouth\s+smile\b", "open-mouth smile"),
-                (r"\bclosed[- ]mouth\s+smile\b", "closed-mouth smile"),
-                (r"\bsmil(?:e|ing)\b", "smiling expression"),
-                (r"\bneutral\s+expression\b", "neutral expression"),
-                (r"\bangry\b", "angry expression"),
-                (r"\bsad\b", "sad expression"),
-                (r"\bsurprised\b", "surprised expression"),
-            ),
+            parser=_parse_expression,
             contrasts={
                 "neutral expression": "smiling expression",
                 "smiling expression": "neutral expression",
@@ -552,5 +994,48 @@ DEFAULT_FACE_ATTRIBUTE_SCHEMA = FaceAttributeSchema(
             },
         ),
     ),
+    name="legacy_default_face_attributes_v1",
+    version="1.0.0-legacy-single-negative",
+)
+
+
+# Sampling values are explicit canonical descriptions, independent of parsing
+# patterns and scientific contrast choices. Neutral portraits keep the mouth
+# closed and avoid accessories that obscure facial features.
+_DEFAULT_SAMPLE_VALUES = {
+    "gender": ("male", "female"),
+    "age": ("around 20 years old", "around 30 years old", "around 40 years old", "around 50 years old", "around 60 years old", "around 70 years old"),
+    "hair": ("short hair", "medium-length hair", "long hair", "bald head"),
+    "hair_color": ("black hair", "brown hair", "blond hair", "gray hair", "red hair"),
+    "hair_texture": ("straight hair", "wavy hair", "curly hair"),
+    "facial_hair": ("no facial hair", "stubble", "beard", "mustache"),
+    "eyes": ("blue eyes", "brown eyes", "green eyes"),
+    "eyebrow_color": ("black eyebrows", "brown eyebrows", "blond eyebrows", "gray eyebrows", "red eyebrows"),
+    "eyebrows": ("thick eyebrows", "thin eyebrows", "arched eyebrows", "straight eyebrows"),
+    "nose": ("broad nose", "narrow nose", "large nose", "small nose", "straight nose", "aquiline nose"),
+    "build": ("broad build", "slim build", "stocky build"),
+    "face_shape": ("round face", "oval face", "long face", "square face"),
+    "race": ("White", "Black", "East Asian", "South Asian", "Latino", "Middle Eastern"),
+    "forehead": ("high forehead", "low forehead"),
+    "mouth": ("thin lips", "full lips", "wide mouth"),
+    "ears": ("protruding ears", "prominent ears", "visible ears"),
+    "jaw": ("square jaw", "strong jaw", "soft jawline"),
+    "teeth": ("no visible teeth",),
+    "expression": ("neutral expression",),
+    "clothing": ("gray shirt",),
+}
+
+
+# The project default deliberately supplies no contrast anchors. A generic face schema
+# cannot choose scientifically valid negative anchors without a candidate-pool
+# definition and a preregistered contrast design.  The legacy lookup table above
+# is retained solely for auditing an old single-negative choice; new code must
+# opt into it explicitly or supply a custom schema/contrast override.
+DEFAULT_FACE_ATTRIBUTE_SCHEMA = FaceAttributeSchema(
+    (
+        replace(definition, contrasts={}, sample_values=_DEFAULT_SAMPLE_VALUES.get(definition.name, ()))
+        for definition in LEGACY_FACE_ATTRIBUTE_SCHEMA_V1.definitions
+    ),
     name="default_face_attributes",
+    version="2.0.0-safe-parsing-only",
 )

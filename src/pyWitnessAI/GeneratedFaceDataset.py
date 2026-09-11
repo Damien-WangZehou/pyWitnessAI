@@ -5,12 +5,17 @@ import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Mapping, Sequence
+from typing import TYPE_CHECKING, Literal, Mapping, Sequence
 
 import pandas as pd
 
-from .FaceAttributeSchema import DEFAULT_FACE_ATTRIBUTE_SCHEMA
-from .FillerGenerator import FaceDescriptionSchema, FillerGenerator, GeneratedFiller, ImageGenerationBackend
+from .FaceAttributeSchema import DEFAULT_FACE_ATTRIBUTE_SCHEMA, FaceAttributeSchema, FaceDescriptionSchema
+from .Description import ParsedDescription, create_description_parser
+from .face_generation_backend import ImageGenerationBackend
+from .model_files import file_sha256 as _file_sha256
+
+if TYPE_CHECKING:
+    from .FaceGenerator import FaceGenerator, GeneratedFace
 
 DatasetMatchMode = Literal["exact", "contains"]
 
@@ -139,63 +144,88 @@ class GeneratedFaceDataset:
             rows = rows.head(n)
         return rows.reset_index(drop=True)
 
-    def generate_fillers(
+    def find(self, description: str, *, parser="schema", **selection_options) -> pd.DataFrame:
+        """Find requested attributes in the manifest without loading an AI model.
+
+        The same schema parser instance can be used by FaceGenerator/FaceSearch.
+        Matching recorded requests does not verify the attributes in the pixels.
+        """
+        parsed = create_description_parser(parser).parse(description)
+        attributes = parsed.schema_attributes
+        if not attributes:
+            raise ValueError("No schema attributes to match; use a schema parser and an explicit description.")
+        selection_options.setdefault("match", "contains")
+        return self.select(FaceDescriptionSchema.from_attributes(description, attributes), **selection_options)
+
+    def generate_faces(
         self,
         schema: FaceDescriptionSchema,
         *,
         verbal_description: str,
         n: int,
+        attribute_schema: FaceAttributeSchema | None = None,
         model: str | None = None,
-        provider: str = "openai",
-        backend: ImageGenerationBackend | None = None,
-        backend_kwargs: Mapping[str, object] | None = None,
+        generator_backend: str | ImageGenerationBackend = "openai",
         size: str = "1024x1024",
         quality: str = "medium",
         output_format: str = "png",
-        overwrite: bool = False,
-        sleep: float = 0.0,
         source_mode: str = "",
         source_stage: str = "",
         source_label_role: str = "",
     ) -> pd.DataFrame:
+        """Generate a controlled batch and store its records in this dataset.
+
+        Explicit schema values, including experimental contrast labels, are
+        passed through as parsed input instead of being inferred from text again.
+        """
+        from .FaceGenerator import FaceGenerator
+
         if n <= 0:
             return pd.DataFrame(columns=self.manifest_columns())
 
-        self.images_dir.mkdir(parents=True, exist_ok=True)
-        generator = FillerGenerator(
-            verbal_description,
+        description = ParsedDescription.from_attributes(
+            schema.attribute_values(), original_text=verbal_description,
+        )
+        if schema.other_details:
+            description = ParsedDescription(
+                description.original_text, description.normalized_text,
+                "; ".join((description.model_text, *schema.other_details)), description.attributes,
+            )
+        generator = FaceGenerator(
+            generator_backend=generator_backend,
+            description=description,
             n=n,
             output_dir=self.images_dir,
             model=model,
-            provider=provider,
-            backend=backend,
-            backend_kwargs=backend_kwargs,
             size=size,
             quality=quality,
             output_format=output_format,
-            overwrite=overwrite,
-            sleep=sleep,
-            schema=schema,
-            naming_strategy="batch",
-            write_metadata=False,
+            attribute_schema=attribute_schema,
+            write_manifest=False,
         )
-        generated = generator.generate()
-        rows = self.records_from_generated(
-            generated,
-            schema=schema,
-            verbal_description=verbal_description,
-            created_at_utc=generator.created_at_utc,
-            source_mode=source_mode,
-            source_stage=source_stage,
-            source_label_role=source_label_role,
-        )
-        self.add_records(rows)
-        self._write_batch_metadata(generator, rows)
+        try:
+            generator.generate()
+        finally:
+            # Keep successful images reusable if a later provider call fails.
+            rows = generator.to_manifest().to_dict("records")
+            for row in rows:
+                row.update(
+                    relative_image_path=_relative_to_root(Path(row["image_path"]), self.root),
+                    verbal_description=verbal_description,
+                    source_mode=source_mode,
+                    source_stage=source_stage,
+                    source_label_role=source_label_role,
+                    schema_hash=_schema_hash(schema),
+                    **_schema_row(schema),
+                )
+            if rows:
+                self.add_records(rows)
+                self._write_batch_metadata(generator, schema, rows)
         return pd.DataFrame.from_records(rows)
 
     def records_from_generated(
         self,
-        generated: Sequence[GeneratedFiller],
+        generated: Sequence[GeneratedFace],
         *,
         schema: FaceDescriptionSchema,
         verbal_description: str,
@@ -323,7 +353,10 @@ class GeneratedFaceDataset:
             )
         return pd.DataFrame.from_records(rows)
 
-    def _write_batch_metadata(self, generator: FillerGenerator, rows: Sequence[Mapping[str, object]]) -> None:
+    def _write_batch_metadata(
+        self, generator: FaceGenerator, schema: FaceDescriptionSchema,
+        rows: Sequence[Mapping[str, object]],
+    ) -> None:
         self.batches_dir.mkdir(parents=True, exist_ok=True)
         metadata = {
             "batch_id": generator.batch_id,
@@ -335,8 +368,9 @@ class GeneratedFaceDataset:
             "size": generator.size,
             "quality": generator.quality,
             "output_format": generator.output_format,
-            "naming_strategy": generator.naming_strategy,
-            "schema": generator.schema.to_dict(),
+            "schema": schema.to_dict(),
+            "attribute_schema_name": generator.attribute_schema.name,
+            "attribute_schema_version": generator.attribute_schema.version,
             "attribute_schema": generator.attribute_schema.to_records(),
             "image_ids": [row.get("image_id") for row in rows],
         }
@@ -422,14 +456,6 @@ def _short_hash(value: object, length: int = 8) -> str:
     else:
         text = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:length]
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _import_batch_id(created_at_utc: str, schema_hash: str, source_paths: Sequence[Path]) -> str:

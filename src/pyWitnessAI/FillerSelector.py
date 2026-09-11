@@ -1,149 +1,126 @@
-import os
-import pickle
+"""Select fillers by eyewitness description or reference-face distance."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
 import numpy as np
-import cv2
-from PIL import Image
-from tqdm import tqdm
-from sentence_transformers import SentenceTransformer
+import pandas as pd
+from PIL import Image, ImageOps
 
-class CLIPFillerSelector:
-    """Legacy largest-face CLIP selector.
+from .FaceSearch import FaceSearch
+from .ImageCatalog import ImageCatalog, image_manifest, image_paths
 
-    New folder-search workflows should use :class:`pyWitnessAI.FaceSearch`.
-    This class keeps its historical largest-face cropping and tuple-list return
-    format so existing experiments do not silently change behaviour.
+__all__ = ["FillerSelector", "select_by_similarity"]
+
+
+class FillerSelector(FaceSearch):
+    """Select the top five fillers by default from a folder or image catalog.
+
+    Inherited ``from_folder`` supports metadata joins and image validation.
+    ``parser``, ``selector`` and ``scoring`` configure independent experiment
+    choices; the defaults are raw text, CLIP, and unscaled cosine similarity.
     """
 
-    def __init__(self, image_dir: str, cache_dir: str = './cache', device: str = None):
-        """
-        :param image_dir: The directory of filler pool
-        :param cache_dir: The directory to store the features
-        :param device:    'cuda' / 'cpu'，sentence-transformers auto-set.
-        """
-        self.image_dir = image_dir
-        self.cache_dir = cache_dir
-        os.makedirs(self.cache_dir, exist_ok=True)
+    def __init__(self, pool, *, n: int = 5, **kwargs) -> None:
+        self.n = _validate_n(n)
+        if isinstance(pool, (str, Path)):
+            pool = ImageCatalog.from_folder(pool)
+        super().__init__(pool, **kwargs)
 
-        # Use sentence-transformers to load the model
-        self.model = SentenceTransformer('clip-ViT-B-32', device=device)
+    @classmethod
+    def from_folder(cls, image_dir, *, n: int = 5, **kwargs):
+        n = _validate_n(n)
+        selector = super().from_folder(image_dir, **kwargs)
+        selector.n = n
+        return selector
 
-        # Use haar to detect faces
-        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-        self.face_cascade = cv2.CascadeClassifier(cascade_path)
-
-        # Build the path of original images
-        self.original_paths = [
-            os.path.join(image_dir, fn)
-            for fn in os.listdir(image_dir)
-            if fn.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))
-        ]
-
-        feat_file = os.path.join(self.cache_dir, 'image_features.npy')
-        paths_file = os.path.join(self.cache_dir, 'image_paths.pkl')
-
-        if os.path.exists(feat_file) and os.path.exists(paths_file):
-            self.image_features = np.load(feat_file)
-            with open(paths_file, 'rb') as f:
-                self.image_paths = pickle.load(f)
-            if len(self.image_paths) != self.image_features.shape[0]:
-                print("[Warning] Cache files are not consistent, rebuilding...")
-                self._build_cache(feat_file, paths_file)
-        else:
-            self._build_cache(feat_file, paths_file)
-
-    def _build_cache(self, feat_file: str, paths_file: str):
-        """Build the cache of image features and paths."""
-        self._cache_image_features()
-        np.save(feat_file, self.image_features)
-        with open(paths_file, 'wb') as f:
-            pickle.dump(self.image_paths, f)
-        print(f"[Info] Cache files built, {len(self.image_paths)} images cached.")
-
-    def _detect_and_crop_face(self, img_pil: Image.Image):
-        """Use OpenCV to detect and crop the face."""
-        img_np = np.array(img_pil)
-        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-        faces = self.face_cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-        )
-        if len(faces) == 0:
-            return None
-
-        # Get the face with the largest area
-        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-        margin = int(min(w, h) * 0.15)
-        x1 = max(0, x - margin)
-        y1 = max(0, y - margin)
-        x2 = min(img_np.shape[1], x + w + margin)
-        y2 = min(img_np.shape[0], y + h + margin)
-        return img_pil.crop((x1, y1, x2, y2)).resize((224, 224))
-
-    def _cache_image_features(self):
-        """Detect and crop faces, then cache the features."""
-        valid_paths = []
-        valid_images = []
-
-        for path in tqdm(self.original_paths, desc="Detecting & cropping faces"):
-            try:
-                img = Image.open(path).convert('RGB')
-                face = self._detect_and_crop_face(img)
-                if face is None:
-                    continue
-                valid_images.append(face)
-                valid_paths.append(path)
-            except Exception as e:
-                print(f"[Skip] {path}: {e}")
-                continue
-
-        if not valid_images:
-            print("[Warning] No faces detected, feature cache is empty.")
-            self.image_features = np.zeros((0, 512), dtype=np.float32)
-            self.image_paths = []
-            return
-
-        # Batch encode
-        batch_size = 32
-        all_feats = []
-        for i in tqdm(range(0, len(valid_images), batch_size), desc="Encoding features"):
-            batch = valid_images[i:i + batch_size]
-            feats = self.model.encode(
-                batch, batch_size=batch_size,
-                convert_to_numpy=True, show_progress_bar=False
-            )
-            # L2 normalize
-            feats = feats / np.linalg.norm(feats, axis=1, keepdims=True)
-            all_feats.append(feats)
-
-        self.image_features = np.vstack(all_feats).astype(np.float32)
-        self.image_paths = valid_paths
-
-    def query(self, verbal_desc: str, top_k: int = 5):
-        """
-        Search for the most similar images based on the verbal description.
-        :param verbal_desc: Verbal description of eyeWitness
-        :param top_k:       Return top-k similar images
-        :return:            List[(image_path, score)]
-        """
-        if self.image_features.shape[0] == 0:
-            print("[Warning] Feature cache is empty, no images to search.")
-            return []
-
-        text_feat = self.model.encode([verbal_desc], convert_to_numpy=True)
-        text_feat = text_feat / np.linalg.norm(text_feat, axis=1, keepdims=True)
-
-        scores = (self.image_features @ text_feat.T).squeeze(1)
-        top_k = min(top_k, len(self.image_paths))
-        top_indices = np.argsort(scores)[::-1][:top_k]
-
-        return [(self.image_paths[i], float(scores[i])) for i in top_indices]
+    def select(self, description, *, n: int | None = None, **kwargs):
+        explicit_policy = any(kwargs.get(key) is not None for key in ("policy", "top_k", "min_score"))
+        if n is not None and explicit_policy:
+            raise ValueError("Pass n or policy/top_k/min_score, not both.")
+        if not explicit_policy:
+            kwargs["top_k"] = self.n if n is None else _validate_n(n)
+        return super().select(description, **kwargs)
 
 
-# Usage example
-if __name__ == "__main__":
-    selector = CLIPFillerSelector(
-        image_dir="D:/PhD/Studies/VerbalDescription/FillerPoolColloff",
-        cache_dir="./cache"
+def select_by_similarity(
+    suspect: Image.Image | str | Path,
+    pool,
+    *,
+    n: int = 5,
+    order: str = "most",
+    model: str = "VGG-Face",
+    backend: str = "opencv",
+    distance_metric: str = "cosine",
+    enforce_detection: bool = True,
+) -> pd.DataFrame:
+    """Select n faces by ImagesAI distance, preserving candidate metadata.
+
+    ``pool`` accepts the same inputs as ``image_paths``. ``order='most'`` takes
+    the smallest distances; ``'least'`` takes the largest. The returned table
+    adds ``face_distance`` and can be passed directly to LineupBuilder. All
+    candidate distances must be finite; a failed face cannot silently enter a
+    least-similar selection. The suspect's own file is excluded automatically.
+    Requires the optional ``pyWitnessAI[vision]`` dependencies only when called.
+    """
+    n = _validate_n(n)
+    if order not in {"most", "least"}:
+        raise ValueError("order must be 'most' or 'least'.")
+    if distance_metric not in {"cosine", "euclidean", "euclidean_l2"}:
+        raise ValueError("distance_metric must be 'cosine', 'euclidean', or 'euclidean_l2'.")
+    if isinstance(suspect, Image.Image):
+        filename = getattr(suspect, "filename", None)
+        suspect_path = Path(filename).resolve() if filename else None
+    else:
+        suspect_path = image_paths([suspect])[0]
+    frame = image_manifest(pool)
+    if suspect_path is not None:
+        frame = frame.loc[frame["image_path"].map(Path) != suspect_path].reset_index(drop=True)
+    if len(frame) < n:
+        raise ValueError(f"Need {n} distinct fillers; pool contains {len(frame)} after excluding the suspect.")
+
+    # Keep model imports and loading out of ordinary text selection and building.
+    from .Images import Images
+    from .ImagesAI import ImagesAI
+
+    columns, rows = Images([]), Images([])
+    columns.images["suspect"] = _similarity_image(suspect)
+    for index, path in enumerate(frame["image_path"]):
+        key = str(index)
+        rows.images[key] = _similarity_image(path)
+        rows.path_to_images[key] = path
+    analyzer = ImagesAI(
+        column_images=columns, row_images=rows, model=model, backend=backend,
+        distance_metric=distance_metric, enforce_detection=enforce_detection,
     )
-    matches = selector.query("Mid-age male with short hair", top_k=1)
-    for img_path, score in matches:
-        print(f"{img_path}  —— Similarity Score：{score:.4f}")
+    analyzer.process()
+    # dataframe() rounds distances; retain full precision when deciding ranks.
+    distances = analyzer.similarity_matrix.reindex(index=list(rows.images))["suspect"].to_numpy(dtype=float)
+    if not np.isfinite(distances).all():
+        failed = frame.loc[~np.isfinite(distances), "image_path"].tolist()
+        raise ValueError(f"Face comparison failed for {len(failed)} candidate(s): {failed}")
+    frame["face_distance"] = distances
+    return frame.sort_values("face_distance", ascending=order == "most", kind="stable").head(n).reset_index(drop=True)
+
+
+def _similarity_image(image) -> Image.Image:
+    if isinstance(image, Image.Image):
+        return ImageOps.exif_transpose(image).convert("RGB")
+    with Image.open(image) as opened:
+        return ImageOps.exif_transpose(opened).convert("RGB")
+
+
+def _validate_n(n: int) -> int:
+    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+        raise ValueError("n must be a positive integer.")
+    return n
+
+
+def __getattr__(name: str):
+    # Preserve the historical import without loading its optional vision stack
+    # when researchers use the lightweight, configurable selector.
+    if name == "CLIPFillerSelector":
+        from ._legacy_filler_selector import CLIPFillerSelector
+        return CLIPFillerSelector
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

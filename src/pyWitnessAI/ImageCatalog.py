@@ -1,6 +1,16 @@
+"""Image manifests: discover files, normalise records, and attach metadata.
+
+Both catalog factories share the same image preparation. Metadata is aligned
+by a unique key, so joining it never adds or reorders image rows.
+
+Public types come first, followed by image preparation, metadata alignment,
+and the small field/report helpers. No model or scoring code belongs here.
+"""
+
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Sequence
@@ -20,6 +30,17 @@ IMAGE_EXTENSIONS = {
 MetadataSource = pd.DataFrame | str | Path
 MetadataCardinality = Literal["one_to_one", "many_to_one"]
 
+_CATALOG_COLUMNS = {
+    "image_id", "target_id", "image_path", "relative_image_path", "image_name",
+    "file_extension", "status", "error", "metadata_matched",
+}
+_JOIN_KEYS = {
+    "image_id": ("image_id",),
+    "relative_image_path": ("relative_image_path", "relative_path"),
+    "image_path": ("image_path", "path"),
+    "image_name": ("image_name", "filename", "file", "name"),
+}
+
 __all__ = [
     "CatalogReport",
     "IMAGE_EXTENSIONS",
@@ -27,6 +48,8 @@ __all__ = [
     "MetadataJoinSpec",
     "MetadataSource",
     "discover_images",
+    "image_manifest",
+    "image_paths",
 ]
 
 
@@ -50,6 +73,8 @@ class MetadataJoinSpec:
 
 @dataclass(frozen=True)
 class CatalogReport:
+    """Image validity and metadata coverage, counted without dropping images."""
+
     image_count: int
     ready_count: int
     invalid_count: int
@@ -66,7 +91,12 @@ class CatalogReport:
 
 
 class ImageCatalog:
-    """Validated, manifest-backed collection of images and optional metadata."""
+    """Image records and their coverage report, independent of image scoring.
+
+    Use ``from_folder`` to discover files or ``from_manifest`` to prepare a
+    DataFrame. ``manifest`` retains all rows; ``ready`` selects usable images.
+    The constructor accepts an already prepared manifest.
+    """
 
     REQUIRED_COLUMNS = ("image_id", "image_path", "relative_image_path", "image_name", "status", "error")
 
@@ -78,6 +108,7 @@ class ImageCatalog:
         report: CatalogReport | None = None,
     ) -> None:
         data = manifest.copy().reset_index(drop=True)
+        _validate_columns(data)
         missing = [column for column in self.REQUIRED_COLUMNS if column not in data.columns]
         if missing:
             raise ValueError(f"Image catalog is missing required columns: {missing}")
@@ -114,27 +145,15 @@ class ImageCatalog:
         if not paths:
             raise FileNotFoundError(f"No supported images found under: {folder}")
 
-        records = []
-        for path in paths:
-            resolved = path.resolve()
-            relative = resolved.relative_to(folder).as_posix()
-            status, error = _image_status(resolved, validate=validate_images)
-            records.append(
-                {
-                    "image_id": _image_id(relative),
-                    "image_path": str(resolved),
-                    "relative_image_path": relative,
-                    "image_name": resolved.name,
-                    "file_extension": resolved.suffix.lower(),
-                    "status": status,
-                    "error": error,
-                }
-            )
-
-        manifest = pd.DataFrame.from_records(records)
+        manifest = _prepare_manifest(
+            pd.DataFrame({"image_path": paths}), folder, validate_images=validate_images,
+        )
+        manifest = manifest[[
+            "image_id", "image_path", "relative_image_path", "image_name",
+            "file_extension", "status", "error", "metadata_matched",
+        ]]
         if metadata is None:
-            manifest["metadata_matched"] = False
-            return cls(manifest, root=folder, report=_catalog_report(manifest))
+            return cls(manifest, root=folder)
 
         metadata_frame, metadata_base = load_metadata(metadata, default_base=folder)
         merged, report = _join_metadata(
@@ -153,66 +172,15 @@ class ImageCatalog:
         base_dir: str | Path | None = None,
         validate_images: bool = False,
     ) -> "ImageCatalog":
-        """Normalise an existing manifest into the common catalog contract."""
-        if "image_path" not in manifest.columns:
-            raise ValueError("Manifest must contain an image_path column.")
+        """Prepare image_path records relative to base_dir, keeping supplied fields.
 
+        Validation is opt-in here. Without it, supplied status/error fields
+        remain authoritative; missing status fields are based on file existence.
+        """
         base = Path(base_dir).resolve() if base_dir is not None else Path.cwd().resolve()
-        data = manifest.copy().reset_index(drop=True)
-        data["image_path"] = data["image_path"].map(lambda value: str(_resolve_path(value, base)))
-        if "relative_image_path" not in data.columns:
-            data["relative_image_path"] = data["image_path"].map(
-                lambda value: _relative_path(Path(value), base)
-            )
-        if "image_name" not in data.columns:
-            data["image_name"] = data["image_path"].map(lambda value: Path(value).name)
-        if "image_id" not in data.columns:
-            data["image_id"] = data["relative_image_path"].map(_image_id)
-        else:
-            if data["image_id"].isna().any():
-                raise ValueError("image_id values must not be empty.")
-            data["image_id"] = data["image_id"].astype(str)
-
-        if validate_images:
-            statuses = data["image_path"].map(lambda value: _image_status(Path(value), validate=True))
-            data["status"] = statuses.map(lambda item: item[0])
-            data["error"] = statuses.map(lambda item: item[1])
-        else:
-            path_exists = data["image_path"].map(lambda value: Path(value).is_file())
-            data["status"] = data.get("status", path_exists.map({True: "ready", False: "missing"}))
-            data["error"] = data.get(
-                "error",
-                path_exists.map({True: "", False: "Image file does not exist."}),
-            )
-
-        catalog_columns = {
-            "image_id",
-            "target_id",
-            "image_path",
-            "relative_image_path",
-            "image_name",
-            "file_extension",
-            "status",
-            "error",
-            "metadata_matched",
-        }
-        metadata_columns = [column for column in data.columns if column not in catalog_columns]
-        metadata_provided = bool(metadata_columns)
-        if "metadata_matched" not in data.columns:
-            if metadata_columns:
-                data["metadata_matched"] = data[metadata_columns].apply(
-                    lambda row: any(not _is_empty_metadata_value(value) for value in row),
-                    axis=1,
-                )
-            else:
-                data["metadata_matched"] = False
-        matched = int(data["metadata_matched"].fillna(False).astype(bool).sum())
+        data = _prepare_manifest(manifest, base, validate_images=validate_images)
         report = _catalog_report(
-            data,
-            metadata_provided=metadata_provided,
-            metadata_row_count=matched,
-            metadata_matched_image_count=matched,
-            metadata_missing_image_count=len(data) - matched if metadata_provided else 0,
+            data, metadata_provided=bool(_metadata_columns(data)), metadata_row_count=None,
         )
         return cls(data, root=base, report=report)
 
@@ -228,6 +196,60 @@ class ImageCatalog:
             f"ImageCatalog(images={len(self.manifest)}, ready={len(self.ready)}, "
             f"metadata={self.report.metadata_provided})"
         )
+
+
+def image_manifest(pool) -> pd.DataFrame:
+    """Normalize usable image paths while preserving supplied metadata.
+
+    Accept a folder, paths, ImageCatalog, or DataFrame with ``image_path``.
+    Tables with a status column contribute only ``ready`` rows. Relative paths
+    use the catalog root, or the working directory for other inputs. Duplicate
+    paths keep their first occurrence; folders use recursive discovery order.
+    This checks file existence, leaving pixel decoding to the consuming tool.
+    """
+    base = pool.root if isinstance(pool, ImageCatalog) else None
+    if isinstance(pool, ImageCatalog):
+        pool = pool.ready
+    if isinstance(pool, pd.DataFrame):
+        _validate_columns(pool)
+        if "image_path" not in pool:
+            raise ValueError("Image table must contain an image_path column.")
+        if "status" in pool:
+            pool = pool.loc[pool["status"].astype(str).eq("ready")]
+        frame = pool
+    elif isinstance(pool, (str, Path)):
+        if isinstance(pool, str) and not pool.strip():
+            raise ValueError("Image path must not be empty.")
+        path = Path(pool)
+        values = discover_images(path) if path.is_dir() else [path]
+        frame = pd.DataFrame({"image_path": values})
+    elif isinstance(pool, Iterable) and not isinstance(pool, (bytes, Mapping)):
+        frame = pd.DataFrame({"image_path": list(pool)})
+    else:
+        raise TypeError("pool must be a folder, image paths, ImageCatalog, or image_path table.")
+
+    paths, positions = [], []
+    seen = set()
+    for position, value in enumerate(frame["image_path"]):
+        if not isinstance(value, (str, Path)):
+            raise TypeError("Each image_path must be a string or Path.")
+        if isinstance(value, str) and not value.strip():
+            raise ValueError("Image path must not be empty.")
+        path = ((base or Path.cwd()) / value).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Image file does not exist: {path}")
+        if path not in seen:
+            seen.add(path)
+            positions.append(position)
+            paths.append(str(path))
+    result = frame.iloc[positions].copy().reset_index(drop=True)
+    result["image_path"] = paths
+    return result
+
+
+def image_paths(pool) -> list[Path]:
+    """Return resolved, distinct paths from ``image_manifest(pool)``."""
+    return [Path(path) for path in image_manifest(pool)["image_path"]]
 
 
 def discover_images(
@@ -249,7 +271,58 @@ def discover_images(
     }
     iterator = folder.rglob("*") if recursive else folder.iterdir()
     paths = [path for path in iterator if path.is_file() and path.suffix.lower() in allowed]
-    return sorted(paths, key=lambda path: path.relative_to(folder).as_posix().casefold())
+    return sorted(paths, key=lambda path: (
+        path.relative_to(folder).as_posix().casefold(), path.relative_to(folder).as_posix(),
+    ))
+
+
+def _prepare_manifest(
+    manifest: pd.DataFrame, base: Path, *, validate_images: bool,
+) -> pd.DataFrame:
+    """Fill image fields without replacing supplied IDs, labels, or metadata."""
+    _validate_columns(manifest)
+    if "image_path" not in manifest.columns:
+        raise ValueError("Manifest must contain an image_path column.")
+    data = manifest.copy().reset_index(drop=True)
+    paths = data["image_path"].map(lambda value: _resolve_path(value, base))
+    data["image_path"] = paths.map(str)
+    for column, transform in (
+        ("relative_image_path", lambda path: _relative_path(path, base)),
+        ("image_name", lambda path: path.name),
+        ("file_extension", lambda path: path.suffix.lower()),
+    ):
+        if column not in data:
+            data[column] = paths.map(transform)
+    if "image_id" not in data:
+        data["image_id"] = data["relative_image_path"].map(_image_id)
+    else:
+        data["image_id"] = data["image_id"].map(str, na_action="ignore")
+    _set_image_status(data, paths, validate=validate_images)
+    if "metadata_matched" not in data:
+        columns = _metadata_columns(data)
+        data["metadata_matched"] = data[columns].apply(
+            lambda row: any(not _is_empty_metadata_value(value) for value in row), axis=1,
+        ) if columns else False
+    return data
+
+
+def _set_image_status(data: pd.DataFrame, paths: pd.Series, *, validate: bool) -> None:
+    """Recheck images on request; otherwise preserve supplied status fields."""
+    if not validate and "status" in data and "error" in data:
+        return
+    statuses = paths.map(lambda path: _image_status(path, validate=validate))
+    for index, column in enumerate(("status", "error")):
+        if validate or column not in data:
+            data[column] = statuses.map(lambda item: item[index])
+
+
+def _validate_columns(frame: pd.DataFrame) -> None:
+    if not frame.columns.is_unique:
+        raise ValueError("Column names must be unique.")
+
+
+def _metadata_columns(manifest: pd.DataFrame) -> list[str]:
+    return [column for column in manifest.columns if column not in _CATALOG_COLUMNS]
 
 
 def load_metadata(
@@ -283,86 +356,79 @@ def _join_metadata(
     metadata_base: Path,
     join_spec: MetadataJoinSpec | None,
 ) -> tuple[pd.DataFrame, CatalogReport]:
+    """Align metadata to image rows after validating the requested key relation."""
+    _validate_columns(metadata)
     if metadata.empty:
         output = manifest.copy()
         output["metadata_matched"] = False
-        return output, _catalog_report(
-            output,
-            metadata_provided=True,
-            metadata_row_count=0,
-            metadata_missing_image_count=len(output),
-        )
+        return output, _catalog_report(output, metadata_provided=True)
 
     spec = join_spec or _infer_metadata_join(manifest, metadata, metadata_base=metadata_base)
     image_key = spec.image_key
     metadata_key = spec.metadata_key or image_key
-    if image_key not in manifest.columns:
-        raise ValueError(f"Image join key is missing from catalog: {image_key}")
-    if metadata_key not in metadata.columns:
-        raise ValueError(f"Metadata join key is missing: {metadata_key}")
-
-    semantic = _join_semantic(image_key)
-    left = manifest.copy()
-    right = metadata.copy()
-    left["__join_key"] = _normalise_join_values(
-        left[image_key],
-        semantic=semantic,
-        base_dir=Path.cwd(),
-        case_sensitive=spec.case_sensitive,
+    image_values, metadata_values = _metadata_join_values(
+        manifest, metadata, spec, metadata_base,
     )
-    right["__join_key"] = _normalise_join_values(
-        right[metadata_key],
-        semantic=semantic,
-        base_dir=metadata_base,
-        case_sensitive=spec.case_sensitive,
-    )
+    _validate_join_values(image_values, image_key, unique=spec.validate == "one_to_one", catalog=True)
+    _validate_join_values(metadata_values, metadata_key, unique=True, catalog=False)
 
-    if (left["__join_key"] == "").any():
-        raise ValueError(f"Catalog join key contains empty values: {image_key}")
-    if spec.validate == "one_to_one" and left["__join_key"].duplicated().any():
-        duplicates = left.loc[left["__join_key"].duplicated(), image_key].tolist()[:3]
-        raise ValueError(f"Catalog join key must be unique; duplicates include {duplicates}")
-    if spec.validate in {"one_to_one", "many_to_one"} and right["__join_key"].duplicated().any():
-        duplicates = right.loc[right["__join_key"].duplicated(), metadata_key].tolist()[:3]
-        raise ValueError(f"Metadata join key must be unique; duplicates include {duplicates}")
-
-    image_keys = set(left["__join_key"])
-    orphan_rows = int((~right["__join_key"].isin(image_keys) & right["__join_key"].ne("")).sum())
-
-    right = right.drop(columns=[metadata_key], errors="ignore")
-    rename = {
-        column: f"metadata__{column}"
-        for column in right.columns
-        if column != "__join_key" and column in left.columns
-    }
-    right = right.rename(columns=rename)
-
-    try:
-        output = left.merge(
-            right,
-            on="__join_key",
-            how="left",
-            validate=spec.validate,
-            indicator="__metadata_merge",
-            sort=False,
-        )
-    except pd.errors.MergeError as exc:
-        raise ValueError(f"Metadata join cardinality failed ({spec.validate}): {exc}") from exc
-
-    output["metadata_matched"] = output["__metadata_merge"].eq("both")
-    matched = int(output["metadata_matched"].sum())
-    output = output.drop(columns=["__join_key", "__metadata_merge"])
-    report = _catalog_report(
+    payload = metadata.drop(columns=metadata_key)
+    payload = _rename_metadata_columns(payload, manifest.columns)
+    aligned = payload.set_axis(metadata_values).reindex(image_values).set_axis(manifest.index)
+    output = pd.concat([manifest.drop(columns="metadata_matched"), aligned], axis=1)
+    output["metadata_matched"] = image_values.isin(metadata_values)
+    orphan_rows = (~metadata_values.isin(image_values) & metadata_values.ne("")).sum()
+    return output, _catalog_report(
         output,
         metadata_provided=True,
         metadata_row_count=len(metadata),
-        metadata_matched_image_count=matched,
-        metadata_missing_image_count=len(output) - matched,
-        metadata_orphan_row_count=orphan_rows,
+        metadata_orphan_row_count=int(orphan_rows),
         image_join_key=image_key,
         metadata_join_key=metadata_key,
     )
-    return output, report
+
+
+def _metadata_join_values(
+    manifest: pd.DataFrame, metadata: pd.DataFrame, spec: MetadataJoinSpec, metadata_base: Path,
+) -> tuple[pd.Series, pd.Series]:
+    metadata_key = spec.metadata_key or spec.image_key
+    if spec.image_key not in manifest:
+        raise ValueError(f"Image join key is missing from catalog: {spec.image_key}")
+    if metadata_key not in metadata:
+        raise ValueError(f"Metadata join key is missing: {metadata_key}")
+    semantic = _join_semantic(spec.image_key)
+    left = _normalise_join_values(
+        manifest[spec.image_key], semantic=semantic,
+        base_dir=Path.cwd(), case_sensitive=spec.case_sensitive,
+    )
+    right = _normalise_join_values(
+        metadata[metadata_key], semantic=semantic,
+        base_dir=metadata_base, case_sensitive=spec.case_sensitive,
+    )
+    return left, right
+
+
+def _validate_join_values(values: pd.Series, key: str, *, unique: bool, catalog: bool) -> None:
+    label = "Catalog" if catalog else "Metadata"
+    if catalog and values.eq("").any():
+        raise ValueError(f"Catalog join key contains empty values: {key}")
+    if unique and not values.is_unique:
+        duplicates = values[values.duplicated()].tolist()[:3]
+        raise ValueError(f"{label} join key must be unique; duplicates include {duplicates}")
+
+
+def _rename_metadata_columns(metadata: pd.DataFrame, image_columns: pd.Index) -> pd.DataFrame:
+    """Keep original labels when possible and prefix conflicts without losing data."""
+    occupied = set(image_columns) | set(metadata.columns)
+    renamed = {}
+    for column in metadata.columns:
+        if column in image_columns:
+            name = f"metadata__{column}"
+            while name in occupied:
+                name = f"metadata__{name}"
+            renamed[column] = name
+            occupied.add(name)
+    return metadata.rename(columns=renamed)
 
 
 def _infer_metadata_join(
@@ -371,37 +437,18 @@ def _infer_metadata_join(
     *,
     metadata_base: Path,
 ) -> MetadataJoinSpec:
-    candidates = (
-        ("image_id", ("image_id",)),
-        ("relative_image_path", ("relative_image_path", "relative_path")),
-        ("image_path", ("image_path", "path")),
-        ("image_name", ("image_name", "filename", "file", "name")),
-    )
     scored: list[tuple[int, int, str, str]] = []
-    for priority, (image_key, metadata_keys) in enumerate(candidates):
+    for priority, (image_key, metadata_keys) in enumerate(_JOIN_KEYS.items()):
         if image_key not in manifest.columns:
             continue
-        semantic = _join_semantic(image_key)
-        left_values = set(
-            _normalise_join_values(
-                manifest[image_key],
-                semantic=semantic,
-                base_dir=Path.cwd(),
-                case_sensitive=False,
-            )
-        ) - {""}
         for metadata_key in metadata_keys:
             if metadata_key not in metadata.columns:
                 continue
-            right_values = set(
-                _normalise_join_values(
-                    metadata[metadata_key],
-                    semantic=semantic,
-                    base_dir=metadata_base,
-                    case_sensitive=False,
-                )
-            ) - {""}
-            overlap = len(left_values & right_values)
+            spec = MetadataJoinSpec(image_key, metadata_key)
+            left, right = _metadata_join_values(manifest, metadata, spec, metadata_base)
+            if not left.is_unique or not right.is_unique or left.eq("").any():
+                continue
+            overlap = len((set(left) & set(right)) - {""})
             if overlap:
                 scored.append((overlap, -priority, image_key, metadata_key))
 
@@ -440,12 +487,9 @@ def _normalise_join_values(
 
 def _join_semantic(column: str) -> str:
     lowered = str(column).strip().lower()
-    if lowered in {"image_path", "path"}:
-        return "image_path"
-    if lowered in {"relative_image_path", "relative_path"}:
-        return "relative_image_path"
-    if lowered in {"image_name", "filename", "file", "name"}:
-        return "image_name"
+    for semantic, aliases in _JOIN_KEYS.items():
+        if lowered in aliases:
+            return semantic
     return "identifier"
 
 
@@ -465,18 +509,10 @@ def _image_status(path: Path, *, validate: bool) -> tuple[str, str]:
 
 
 def _is_empty_metadata_value(value: object) -> bool:
-    if value is None:
-        return True
-    try:
-        missing = pd.isna(value)
-    except (TypeError, ValueError):
-        missing = False
-    try:
-        if bool(missing):
-            return True
-    except (TypeError, ValueError):
-        pass
-    return isinstance(value, str) and not value.strip()
+    if isinstance(value, str):
+        return not value.strip()
+    # Lists and other structured metadata are values, not scalar missing markers.
+    return pd.api.types.is_scalar(value) and bool(pd.isna(value))
 
 
 def _image_id(relative_path: object) -> str:
@@ -501,32 +537,23 @@ def _catalog_report(
     manifest: pd.DataFrame,
     *,
     metadata_provided: bool = False,
-    metadata_row_count: int = 0,
-    metadata_matched_image_count: int | None = None,
-    metadata_missing_image_count: int | None = None,
+    metadata_row_count: int | None = 0,
     metadata_orphan_row_count: int = 0,
     image_join_key: str | None = None,
     metadata_join_key: str | None = None,
 ) -> CatalogReport:
     ready = int(manifest["status"].astype(str).eq("ready").sum())
-    matched = (
-        int(manifest.get("metadata_matched", pd.Series(False, index=manifest.index)).fillna(False).sum())
-        if metadata_matched_image_count is None
-        else metadata_matched_image_count
-    )
-    missing = (
-        len(manifest) - matched
-        if metadata_provided and metadata_missing_image_count is None
-        else int(metadata_missing_image_count or 0)
-    )
+    matched = int(manifest.get(
+        "metadata_matched", pd.Series(False, index=manifest.index),
+    ).fillna(False).astype(bool).sum())
     return CatalogReport(
         image_count=len(manifest),
         ready_count=ready,
         invalid_count=len(manifest) - ready,
         metadata_provided=metadata_provided,
-        metadata_row_count=metadata_row_count,
+        metadata_row_count=matched if metadata_row_count is None else metadata_row_count,
         metadata_matched_image_count=matched,
-        metadata_missing_image_count=missing,
+        metadata_missing_image_count=len(manifest) - matched if metadata_provided else 0,
         metadata_orphan_row_count=metadata_orphan_row_count,
         image_join_key=image_join_key,
         metadata_join_key=metadata_join_key,
