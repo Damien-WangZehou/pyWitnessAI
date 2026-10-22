@@ -25,7 +25,7 @@ from .model_files import file_sha256
 
 __all__ = ["FaceStandardizer", "StandardizedFace"]
 
-_VERSION = "portrait-v2"
+_VERSION = "portrait-v3"
 _YUNET_URL = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 _YUNET_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
 _U2NET_URL = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net_human_seg.onnx"
@@ -34,7 +34,7 @@ _U2NET_SHA256 = "01eb6a29a5c4d8edb30b56adad9bb3a2a0535338e480724a213e0acfd2d1c73
 
 @dataclass(frozen=True)
 class StandardizedFace:
-    """Portrait, foreground mask, QC data, and optional unenhanced counterpart."""
+    """Portrait, coverage/foreground mask, QC data, and unenhanced counterpart."""
 
     image: Image.Image
     mask: Image.Image
@@ -43,7 +43,7 @@ class StandardizedFace:
 
 
 class FaceStandardizer:
-    """Align eyes, replace backgrounds, and optionally cap spatial detail.
+    """Align and crop portraits; optionally remove backgrounds or cap detail.
 
     ``run(folder_or_manifest, output_dir)`` returns an ImageCatalog and saves a
     manifest, configuration, PNG portraits, and masks. Use a new/empty output
@@ -51,8 +51,10 @@ class FaceStandardizer:
 
     Optional callables operate on EXIF-oriented, sRGB PIL images: detector returns
     five (x, y) points (eyes, nose, mouth corners); segmenter returns a same-size
-    L mask (0 background, 255 foreground). Imports/downloads are lazy; default
-    inference uses local YuNet and U2Net, never an image-generation service.
+    L mask (0 background, 255 foreground). Backgrounds are retained by default;
+    ``remove_background=True`` enables segmentation with local U2Net or the
+    supplied segmenter. An explicitly supplied mask also enables masking.
+    Imports/downloads are lazy; alignment uses local YuNet.
     An optional enhancer(image, *, landmarks) returns same-size RGB pixels;
     both routes share original measurements and all enhanced outputs need review.
     """
@@ -64,6 +66,7 @@ class FaceStandardizer:
         eye_distance: float = 0.25,
         eye_height: float = 0.47,
         background: tuple[int, int, int] = (224, 224, 224),
+        remove_background: bool = False,
         detail_eye_distance: float | None = None,
         detector: Callable | None = None,
         segmenter: Callable | None = None,
@@ -76,12 +79,15 @@ class FaceStandardizer:
             raise ValueError("eye_distance and eye_height must be fractions between 0 and 1.")
         if len(background) != 3 or any(isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 255 for v in background):
             raise ValueError("background must contain three integer RGB values in [0, 255].")
+        if not isinstance(remove_background, bool):
+            raise TypeError("remove_background must be a bool.")
         if detail_eye_distance is not None and (not np.isfinite(detail_eye_distance) or detail_eye_distance < 8):
             raise ValueError("detail_eye_distance must be None or a finite pixel distance >= 8.")
         if any(value is not None and not callable(value) for value in (detector, segmenter, enhancer)):
             raise TypeError("detector, segmenter, and enhancer must be callables or None.")
         self.size, self.eye_distance, self.eye_height = tuple(size), float(eye_distance), float(eye_height)
         self.background = tuple(background)
+        self.remove_background = remove_background
         self.detail_eye_distance = float(detail_eye_distance) if detail_eye_distance is not None else None
         self.detector, self.segmenter = detector, segmenter
         self.enhancer = enhancer
@@ -93,6 +99,9 @@ class FaceStandardizer:
     ) -> StandardizedFace:
         """Render one portrait; optional measured landmarks/mask bypass models.
 
+        A supplied mask explicitly enables masking, even when automatic background
+        removal is disabled. Otherwise the returned mask records source coverage
+        and alpha after alignment, rather than a foreground segmentation.
         Coordinates/mask must refer to the image AFTER EXIF orientation. QC flags
         are review requests, not proof of identity preservation or lineup fairness.
         Spatial detail is a sampling ceiling; blur and compression can still differ.
@@ -113,15 +122,23 @@ class FaceStandardizer:
         native_distance = float(np.linalg.norm(delta))
         if native_distance < 4:
             raise ValueError("Eye landmarks are coincident or too close to align.")
-        foreground = mask if mask is not None else self._segment(flattened)
+        background_removed = mask is not None or self.remove_background
+        if mask is not None:
+            foreground, mask_source = mask, "supplied"
+        elif self.remove_background:
+            foreground = self._segment(flattened)
+            mask_source = _callable_name(self.segmenter) if self.segmenter else "u2net_human_seg"
+        else:
+            foreground, mask_source = alpha, "source_alpha"
         if not isinstance(foreground, Image.Image) or foreground.mode != "L" or foreground.size != rgb.size:
             raise ValueError("Foreground mask must be a same-size PIL L image (0 background, 255 foreground).")
         foreground = Image.fromarray(np.minimum(np.asarray(foreground), np.asarray(alpha)))
         pixels = np.asarray(foreground)
-        if np.count_nonzero(pixels > 127) < 0.01 * pixels.size:
-            raise ValueError("Foreground segmentation is empty or implausibly small.")
-        if any(pixels[int(y), int(x)] < 128 for x, y in points):
-            raise ValueError("Foreground mask excludes core facial landmarks; review the segmentation.")
+        if background_removed:
+            if np.count_nonzero(pixels > 127) < 0.01 * pixels.size:
+                raise ValueError("Foreground segmentation is empty or implausibly small.")
+            if any(pixels[int(y), int(x)] < 128 for x, y in points):
+                raise ValueError("Foreground mask excludes core facial landmarks; review the segmentation.")
 
         target_distance = self.eye_distance * self.size[0]
         matrix = _eye_transform(eyes, target_distance, (self.size[0] / 2, self.eye_height * self.size[1]))
@@ -129,7 +146,10 @@ class FaceStandardizer:
         sampling_distance = min(target_distance, self.detail_eye_distance or target_distance)
         detail_ratio = sampling_distance / target_distance
         aligned_mask = _limit_detail(_warp(foreground, matrix, self.size, 0), detail_ratio)
-        flags = _quality_flags(pixels, points, aligned_points, np.asarray(aligned_mask), native_distance, sampling_distance, matrix)
+        flags = _quality_flags(
+            pixels, points, aligned_points, np.asarray(aligned_mask), native_distance,
+            sampling_distance, matrix, check_foreground=background_removed,
+        )
         portrait = self._render(rgb, foreground, matrix, aligned_mask, detail_ratio)
         baseline = None
         if self.enhancer is not None:
@@ -152,7 +172,8 @@ class FaceStandardizer:
             "roll_degrees": float(np.degrees(np.arctan2(delta[1], delta[0]))),
             "input_landmarks": json.dumps(points.tolist()),
             "landmark_source": "supplied" if landmarks is not None else _callable_name(self.detector) if self.detector else "YuNet-2023mar",
-            "mask_source": "supplied" if mask is not None else _callable_name(self.segmenter) if self.segmenter else "u2net_human_seg",
+            "mask_source": mask_source,
+            "background_removed": background_removed,
             "transform_matrix": json.dumps(matrix.tolist()),
             "enhancement_applied": self.enhancer is not None,
             "enhancer": _callable_name(self.enhancer) if self.enhancer is not None else None,
@@ -198,7 +219,7 @@ class FaceStandardizer:
         if not ready.empty:
             if "landmarks" not in ready or ready["landmarks"].map(_missing).any():
                 self._load_detector()
-            if "mask_path" not in ready or ready["mask_path"].map(_missing).any():
+            if self.remove_background and ("mask_path" not in ready or ready["mask_path"].map(_missing).any()):
                 self._load_segmenter()
             if callable(getattr(self.enhancer, "prepare", None)):
                 self.enhancer.prepare()
@@ -323,10 +344,12 @@ class FaceStandardizer:
     def _recipe(self) -> dict[str, object]:
         recipe = dict(
             version=_VERSION, size=self.size, eye_distance=self.eye_distance, eye_height=self.eye_height,
-            background=self.background, detail_eye_distance=self.detail_eye_distance,
+            background=self.background, remove_background=self.remove_background,
+            detail_eye_distance=self.detail_eye_distance,
             color="sRGB; untagged RGB assumed sRGB; no exposure or skin-tone matching",
             detector=_callable_name(self.detector) if self.detector else "YuNet-2023mar",
-            segmenter=_callable_name(self.segmenter) if self.segmenter else "u2net_human_seg",
+            segmenter=((_callable_name(self.segmenter) if self.segmenter else "u2net_human_seg")
+                       if self.remove_background else None),
             python=platform.python_version(), pillow=pillow_version, numpy=np.__version__,
             enhancement=(self.enhancer.recipe() if callable(getattr(self.enhancer, "recipe", None))
                          else {"callable": _callable_name(self.enhancer)} if self.enhancer is not None else None),
@@ -402,26 +425,28 @@ def _warp(image, matrix, size, fill):
     return image.transform(size, Image.Transform.AFFINE, inverse.ravel(), Image.Resampling.BICUBIC, fillcolor=fill)
 
 
-def _quality_flags(mask, points, aligned, aligned_mask, native_distance, sampling_distance, matrix):
+def _quality_flags(mask, points, aligned, aligned_mask, native_distance, sampling_distance, matrix, *, check_foreground=True):
     flags = []
     if native_distance < sampling_distance - 0.5:
         flags.append("insufficient_native_resolution")
-    if np.any(mask[:2] > 127):
-        flags.append("source_head_touches_top")
-    # Exclude shoulders when checking lateral head truncation.
-    head_bottom = min(mask.shape[0], max(1, int(points[2, 1] + native_distance * 0.5)))
-    if np.any(mask[:head_bottom, :2] > 127) or np.any(mask[:head_bottom, -2:] > 127):
-        flags.append("source_head_touches_side")
-    out_head_bottom = min(aligned_mask.shape[0], max(1, int(aligned[2, 1] + np.linalg.norm(aligned[0] - aligned[1]) * 0.5)))
-    if np.any(aligned_mask[:2] > 127) or np.any(aligned_mask[:out_head_bottom, :2] > 127) or np.any(aligned_mask[:out_head_bottom, -2:] > 127):
-        flags.append("output_head_touches_edge")
+    if check_foreground:
+        if np.any(mask[:2] > 127):
+            flags.append("source_head_touches_top")
+        # Exclude shoulders when checking lateral head truncation.
+        head_bottom = min(mask.shape[0], max(1, int(points[2, 1] + native_distance * 0.5)))
+        if np.any(mask[:head_bottom, :2] > 127) or np.any(mask[:head_bottom, -2:] > 127):
+            flags.append("source_head_touches_side")
+        out_head_bottom = min(aligned_mask.shape[0], max(1, int(aligned[2, 1] + np.linalg.norm(aligned[0] - aligned[1]) * 0.5)))
+        if np.any(aligned_mask[:2] > 127) or np.any(aligned_mask[:out_head_bottom, :2] > 127) or np.any(aligned_mask[:out_head_bottom, -2:] > 127):
+            flags.append("output_head_touches_edge")
     if (aligned < 2).any() or (aligned >= np.array(aligned_mask.shape[::-1]) - 2).any():
         flags.append("landmark_outside_output")
-    bottom_x = np.flatnonzero(mask[-1] > 127)
-    boundary = np.column_stack((bottom_x, np.full(len(bottom_x), mask.shape[0] - 1)))
-    boundary = boundary @ matrix[:, :2].T + matrix[:, 2]
-    if np.any(np.all((boundary > 2) & (boundary < np.array(aligned_mask.shape[::-1]) - 2), axis=1)):
-        flags.append("source_bottom_in_output")
+    if check_foreground:
+        bottom_x = np.flatnonzero(mask[-1] > 127)
+        boundary = np.column_stack((bottom_x, np.full(len(bottom_x), mask.shape[0] - 1)))
+        boundary = boundary @ matrix[:, :2].T + matrix[:, 2]
+        if np.any(np.all((boundary > 2) & (boundary < np.array(aligned_mask.shape[::-1]) - 2), axis=1)):
+            flags.append("source_bottom_in_output")
     eyes = points[:2][np.argsort(points[:2, 0])]
     # A conservative asymmetry cue, not a calibrated yaw estimate.
     if abs(np.dot(points[2] - eyes.mean(axis=0), (eyes[1] - eyes[0]) / native_distance)) > native_distance * 0.25:
