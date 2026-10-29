@@ -257,18 +257,18 @@ from pyWitnessAI.clip import (
 `MODEL_SNAPSHOT_HASH_VERSION` 和 `directory_content_sha256` 同样从 `pyWitnessAI.clip`
 导入。请更新旧脚本和笔记本；记录源码指纹时统一使用 `src/pyWitnessAI/clip.py`。
 
-Qualtrics 的 CFD 适配、固定候选池、冻结 profile、解析/评分契约、服务及验证
-归 `studies/qualtrics_cfd_clip` 所有。研究入口直接保存研究实现并调用通用功能。
+旧 CFD/CLIP Qualtrics 研究已从当前源码树移除。复现该研究时，应使用包含其
+完整实现、配置和数据准备说明的历史 Git 版本。
 核心包不再提供 `pyWitnessAI.cfd`、`pyWitnessAI.experiment` 或 CFD 服务别名。
-研究专用导入、依赖和启动方式见
-[Qualtrics study 说明](../studies/qualtrics_cfd_clip/README.md)。
+新研究应在自己的项目中保存数据集适配、候选池、评分配置、服务入口和验证测试，
+通过公共接口调用本指南中的通用功能。
 
 `FaceSearch` 新增了同样的 `parser`、`scoring` 参数，仍要求明确的
 `top_k`、`min_score` 或 `policy`；`FillerSelector` 是默认选择前 5 张的便捷入口。
 
 公开的 `EyewitnessContrastPromptBuilder` 默认使用通用人脸模板和宽松规则；
-`policy="strict_v1"` 选择严格解析规则。要复现 Qualtrics 冻结实验，应使用研究
-目录内的配置与 parser/scorer；仅切换解析 policy 不会恢复旧模板和完整评分契约。
+`policy="strict_v1"` 选择严格解析规则。解析 policy 本身不定义一项研究的完整
+模板和评分协议；复现时还需固定该研究的配置、parser/scorer 与代码版本。
 
 历史 `pyWitnessAI.FillerSelector.CLIPFillerSelector` 导入路径仍可用，保留其最大人脸裁剪行为。
 

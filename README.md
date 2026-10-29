@@ -33,10 +33,9 @@ Models load when their feature is used and may download weights on first use.
 
 `data/` is an ignored local workspace for datasets and generated results. Its
 images, CFD norming workbook, generated prompt CSVs and benchmark outputs are
-not included in a clone, source distribution or wheel. Supply the data needed
-by your study; the [Qualtrics guide](studies/qualtrics_cfd_clip/README.md#构建与验证-vit-l-14-live-index)
-lists its image and metadata paths. Generation scripts and study configurations
-remain in `studies`.
+not included in a clone, source distribution or wheel. Supply the image and
+metadata paths required by your study through its configuration. Retained
+generation scripts and study configurations live in `studies`.
 
 For the controlled attribute probe, prepare the local prompt CSV and per-image
 prompt files without calling an image service:
@@ -304,20 +303,30 @@ from pyWitnessAI.clip import ClipIndex, SentenceTransformerClipEncoder
 The package CLI provides `parse` and `serve`. Core description and contrast
 scoring defaults use general face prompts without a fixed CFD candidate pool.
 
-## Qualtrics experiment
+## Research integrations
 
-The retained [Qualtrics study](studies/qualtrics_cfd_clip/README.md) owns its CFD
-adapter, fixed candidate pool, frozen profile, model preparation, HTTP service,
-index building and validation. Its scripts call the general package functions;
-its requirements and study assets remain in `studies/qualtrics_cfd_clip`.
-Run the study from a repository checkout using that guide's commands.
+Study projects own their dataset adapters, candidate pools, questionnaire assets,
+condition assignment, validation protocols and deployment configuration. Their
+scripts and services call the shared Python interfaces described above and
+record the data, model, prompt and code versions used for each experiment.
 
-The study service starts from its own entry point; `pyWitnessAI serve` starts
-the general lineup/session service.
+`pyWitnessAI serve` starts the general lineup/session service. A study-specific
+service defines its own entry point, request contract and tests.
+
+The former CFD/CLIP Qualtrics study has been removed from the current source
+tree. Reproducing that study requires a historical Git revision containing its
+study implementation, configuration and data requirements.
+
 Deployment infrastructure belongs in a separate project. See the
 [module map](docs/CoreModuleMap.zh-CN.md) for the current ownership boundaries.
 
 ---
+
+## Development and release builds
+
+See the [development guide](docs/Development.md) for core tests, study-test
+boundaries, and release builds from a clean source distribution. Historical
+files under `build/` are local artifacts, not supported entry points.
 
 ## FAQ
 

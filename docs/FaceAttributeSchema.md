@@ -57,8 +57,9 @@ For multi-category Positive–Negative retrieval, do not reduce categories to an
 arbitrary single negative. Use a versioned, candidate-pool-specific registry
 that averages concrete alternative anchors and explicitly records its
 validation status.
-The current CFD White-Male-Neutral registry is an offline pilot registry, not a
-general or independently validated production schema.
+The former CFD White-Male-Neutral pilot registry belonged to the removed study
+and is not distributed with the current core package. New studies must supply
+and validate their own candidate-pool-specific contrast configuration.
 
 ## Legacy mapping table
 

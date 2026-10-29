@@ -233,5 +233,5 @@ app = create_app(
 | `API/__init__.py` | 轻量命名空间；导入时不加载 FastAPI 或生成 SDK |
 
 `pyWitnessAI serve` 直接启动本指南的阵容/会话服务。
-固定 CFD 实验的服务和协议归 `studies/qualtrics_cfd_clip`，使用其独立入口；
-见 [Qualtrics study 说明](../studies/qualtrics_cfd_clip/README.md)。
+研究专用服务应在研究项目中维护自己的入口、问卷协议、分组和验证测试，
+通过本指南的 Python 接口组合生成、阵容和会话功能。

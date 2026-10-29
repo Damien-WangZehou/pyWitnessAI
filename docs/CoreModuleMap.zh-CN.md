@@ -9,8 +9,7 @@
 | --- | --- |
 | `src/pyWitnessAI` | 可由不同研究调用的功能；接收数据、配置和可替换后端 |
 | `src/pyWitnessAI/API` | 对外入口及外部服务适配；HTTP、CLI、OpenAI 调用和模型下载 |
-| `studies/qualtrics_cfd_clip` | CFD 适配、固定候选池、冻结描述/评分契约、profile、问卷、研究服务、索引和验证入口及研究测试 |
-| `studies` 中其他保留的脚本与笔记本 | 各自的实验设置、分析和验证步骤；调用核心包 |
+| `studies` 中保留的脚本与笔记本 | 各自的实验设置、数据准备、分析和验证步骤；调用核心包 |
 | `test` | 通用模块的回归测试 |
 | `test/fixtures/georgia_state_video1` | 八张必要的小型测试 PNG；随仓库和源码分发包提供，不进入 wheel |
 | `data` | 被 Git 忽略的本地数据与生成结果；图片、Excel、生成 CSV 不随 clone 或包发布 |
@@ -92,8 +91,8 @@ HTTP 嵌入使用 `from pyWitnessAI.API.http import create_app`，命令行使�
 API 文件各自持有实际适配逻辑；业务类无需增加一组转发方法。
 CLIP、CodeFormer 的本地推理和模型文件哈希仍属于核心。
 
-Qualtrics 服务从研究目录的 `clip_lineup_service.py` 启动，固定协议与研究参数
-留在 `studies/qualtrics_cfd_clip`，不进入通用 API 目录。
+研究专用服务由研究项目提供独立入口、请求协议和测试，调用公共 Python 接口。
+候选池、分组、问卷与验证配置由各项研究维护。
 
 ## 视频与既有辅助接口
 
@@ -108,7 +107,7 @@ Qualtrics 服务从研究目录的 `clip_lineup_service.py` 启动，固定协�
 | [VideoLineupPipeline.py](../src/pyWitnessAI/VideoLineupPipeline.py) | 组合视频帧、人脸距离和阵容决策，导出逐帧结果及 pyWitness 格式 |
 | [utils/Constants.py](../src/pyWitnessAI/utils/Constants.py)、[utils/plots.py](../src/pyWitnessAI/utils/plots.py)、[utils/DataFlattener.py](../src/pyWitnessAI/utils/DataFlattener.py) | 既有配色、结果图和嵌套数据展开工具；`utils/__init__.py` 为包入口 |
 | [_legacy_filler_selector.py](../src/pyWitnessAI/_legacy_filler_selector.py) | 历史 `CLIPFillerSelector` 的裁脸和返回值契约；当前 `FillerSelector` 使用通用检索 |
-| [Old](../src/pyWitnessAI/Old) | 既有历史实现；当前检索、benchmark 和 Qualtrics 流程不从这里构建功能 |
+| [Old](../src/pyWitnessAI/Old) | 既有历史实现；当前检索、benchmark 和阵容接口由各自的核心模块提供 |
 | `Local_Models` | 检测器资源；按可选视觉功能使用 |
 
 上述既有视频与兼容接口本轮保留，未据此宣称其内部已完成全面剪枝。
@@ -118,9 +117,9 @@ Qualtrics 服务从研究目录的 `clip_lineup_service.py` 启动，固定协�
 `__init__.py` 显式登记公开接口并按需加载所属模块；`API/cli.py` 提供 `parse`、`serve`；
 `__main__.py` 支持 `python -m pyWitnessAI`。`_version.py` 由构建工具生成。
 
-CFD 文件名/Excel 适配归 Qualtrics 研究。
-该研究在自己的 `description.py`、`scoring.py` 中定义冻结契约，调用共享解析和
-计算引擎；模板、版本、fallback 与审计字段由研究测试保护。
+各项研究自行保存数据集适配、候选池与真值规则、分组、提示词、评分和验证配置，
+并记录数据、模型、配置与代码版本。已删除研究的复现需要使用包含其完整实现的
+历史 Git 版本；当前通用模块不包含旧研究的冻结协议。
 
 详细使用见 [检索指南](FillerSelection.md)、[属性 benchmark](AttributeRetrievalBenchmark.md)、
-[阵容与会话](LineupSession.md) 以及 [Qualtrics 研究说明](../studies/qualtrics_cfd_clip/README.md)。
+[阵容与会话](LineupSession.md)。
