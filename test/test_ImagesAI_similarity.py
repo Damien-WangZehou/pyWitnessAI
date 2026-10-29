@@ -1,5 +1,15 @@
+from pathlib import Path
+
 from pyWitnessAI import Images, ImagesAI
 from pytest import approx
+
+
+_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "georgia_state_video1"
+
+
+def _fixture_path(name):
+    return str(_FIXTURES / name)
+
 
 # ---------- Georgia State ----------
 def test_ImagesAI_similarity_georgia_pipeline():
@@ -8,10 +18,10 @@ def test_ImagesAI_similarity_georgia_pipeline():
     using the dedicated process_georgia_pipeline method.
     """
     # Load images as specified in the notebook's code cell for the Georgia pipeline
-    WH_column_images_Georgia = Images("./data/01_Georgia_State_Video1/Video1_ProbeImage.png")
+    WH_column_images_Georgia = Images(_fixture_path('Video1_ProbeImage.png'))
     WH_row_images_Georgia = Images([
-        "./data/01_Georgia_State_Video1/*Mugshot*",
-        "./data/01_Georgia_State_Video1/Video1_Perpetrator.png"
+        _fixture_path('*Mugshot*'),
+        _fixture_path('Video1_Perpetrator.png')
     ])
 
     image_analyzer_Georgia = ImagesAI(
@@ -34,8 +44,8 @@ def test_ImagesAI_similarity_georgia_pipeline():
 
 # ---------- different distance metrics ----------
 def test_ImagesAI_similarity_mtcnn_facenet_euclidean_l2():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -60,8 +70,8 @@ def test_ImagesAI_similarity_mtcnn_facenet_euclidean_l2():
 
 
 def test_ImagesAI_similarity_mtcnn_facenet_cosine():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -84,8 +94,8 @@ def test_ImagesAI_similarity_mtcnn_facenet_cosine():
 
 
 def test_ImagesAI_similarity_mtcnn_facenet_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -109,8 +119,8 @@ def test_ImagesAI_similarity_mtcnn_facenet_euclidean():
 
 # ---------- different detection backends ----------
 def test_ImagesAI_similarity_opencv_facenet_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -133,8 +143,8 @@ def test_ImagesAI_similarity_opencv_facenet_euclidean():
 
 
 def test_ImagesAI_similarity_fastmtcnn_facenet_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -157,8 +167,8 @@ def test_ImagesAI_similarity_fastmtcnn_facenet_euclidean():
 
 
 def test_ImagesAI_similarity_ssd_facenet_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -181,8 +191,8 @@ def test_ImagesAI_similarity_ssd_facenet_euclidean():
 
 
 def test_ImagesAI_similarity_dlib_facenet_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -205,8 +215,8 @@ def test_ImagesAI_similarity_dlib_facenet_euclidean():
 
 
 def test_ImagesAI_similarity_retinaface_facenet_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -229,8 +239,8 @@ def test_ImagesAI_similarity_retinaface_facenet_euclidean():
 
 
 def test_ImagesAI_similarity_yunet_facenet_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -253,8 +263,8 @@ def test_ImagesAI_similarity_yunet_facenet_euclidean():
 
 
 def test_ImagesAI_similarity_centerface_facenet_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -278,8 +288,8 @@ def test_ImagesAI_similarity_centerface_facenet_euclidean():
 
 # ---------- different models ----------
 def test_ImagesAI_similarity_mtcnn_vggface_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -301,8 +311,8 @@ def test_ImagesAI_similarity_mtcnn_vggface_euclidean():
 
 
 def test_ImagesAI_similarity_mtcnn_facenet512_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -324,8 +334,8 @@ def test_ImagesAI_similarity_mtcnn_facenet512_euclidean():
 
 
 def test_ImagesAI_similarity_mtcnn_openface_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -347,8 +357,8 @@ def test_ImagesAI_similarity_mtcnn_openface_euclidean():
 
 
 def test_ImagesAI_similarity_mtcnn_deepid_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -370,8 +380,8 @@ def test_ImagesAI_similarity_mtcnn_deepid_euclidean():
 
 
 def test_ImagesAI_similarity_mtcnn_arcface_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -393,8 +403,8 @@ def test_ImagesAI_similarity_mtcnn_arcface_euclidean():
 
 
 def test_ImagesAI_similarity_mtcnn_dlib_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -416,8 +426,8 @@ def test_ImagesAI_similarity_mtcnn_dlib_euclidean():
 
 
 def test_ImagesAI_similarity_mtcnn_sface_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,
@@ -439,8 +449,8 @@ def test_ImagesAI_similarity_mtcnn_sface_euclidean():
 
 
 def test_ImagesAI_similarity_mtcnn_ghostfacenet_euclidean():
-    WH_column_images = Images("./data/01_Georgia_State_Video1/Video1_Perpetrator.png")
-    WH_row_images = Images("./data/01_Georgia_State_Video1/*Mugshot*")
+    WH_column_images = Images(_fixture_path('Video1_Perpetrator.png'))
+    WH_row_images = Images(_fixture_path('*Mugshot*'))
 
     image_analyzer = ImagesAI(
         column_images=WH_column_images,

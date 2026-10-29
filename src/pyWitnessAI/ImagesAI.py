@@ -42,9 +42,21 @@ class ImagesAI:
         # Torch device
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        # FaceNet stack
-        self.mtcnn = MTCNN(device=self.device)
-        self.resnet = InceptionResnetV1(pretrained='vggface2').eval().to(self.device)
+        # DeepFace comparisons do not need to load a second recognition model.
+        self._mtcnn = None
+        self._resnet = None
+
+    @property
+    def mtcnn(self):
+        if self._mtcnn is None:
+            self._mtcnn = MTCNN(device=self.device)
+        return self._mtcnn
+
+    @property
+    def resnet(self):
+        if self._resnet is None:
+            self._resnet = InceptionResnetV1(pretrained='vggface2').eval().to(self.device)
+        return self._resnet
 
     # ---------- utils ----------
     def _progress(self, iterable, desc: str):

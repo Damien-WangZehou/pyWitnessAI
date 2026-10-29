@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyWitnessAI"
-description = "DeepFace-based facial recognition utilities"
+description = "Configurable eyewitness description, filler selection, and face analysis tools"
+readme = "README.md"
 # Use setuptools_scm to derive the version from Git tags; see [tool.setuptools_scm] below.
 dynamic = ["version"]
 requires-python = ">=3.10, <3.12"
@@ -15,24 +16,53 @@ authors = [
 
 # Core minimal dependencies. Keep this light; heavy/fragile deps are moved to extras.
 dependencies = [
-    "cv",
-    "deepface",
-    "matplotlib",
-    "ipython",
+    "numpy",
     "pandas",
-    "facenet-pytorch",
-    "mtcnn == 0.1.1",           # Has to be pinned for compatibility
-    "tf-keras",                 # For RetinaFace from deepface module
-#    "tensorflow == 2.16.1",     # Pinned for compatibility with deepface and keras
-#    "keras == 3.0.5",           # Pinned for compatibility with deepface and tensorflow
-#    "pillow",
-#    "typing_extensions",
-#    "requests",
-#    "absl-py<2.0.0",
-#    "gast==0.6.0",
+    "Pillow",
 ]
 
 [project.optional-dependencies]
+clip = [
+    # Validated encoder compatibility; study-specific constraints live with the study.
+    "sentence-transformers==2.7.0",
+    "transformers==4.40.0",
+    "tokenizers==0.19.1",
+    "torch",
+    "tqdm",
+]
+vision = [
+    "pyWitnessAI[plot]",
+    "deepface",
+    "facenet-pytorch",
+    "mtcnn==0.1.1",             # Retain existing detector compatibility.
+    "tf-keras",
+    "opencv-python",
+    "tqdm",
+]
+plot = [
+    "matplotlib",
+]
+excel = [
+    "openpyxl",
+    "xlrd",
+]
+generation = [
+    "openai>=1.0",
+]
+standardization = [
+    "opencv-python>=4.8,<5",
+    "onnxruntime>=1.17,<2",
+]
+enhancement = [
+    "pyWitnessAI[standardization]",
+    "torch>=2.6,<3",
+]
+api = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "pydantic>=2,<3",
+]
+
 colloff_replication = [
     "deepface==0.0.79",
     "tensorflow==2.14.0",
@@ -48,20 +78,23 @@ colloff_replication = [
     "setuptools==81.0.0",
 ]
 notebook = [
+    "ipython",
     "jupyterlab>=4,<5",
     "ipykernel>=6,<7",
 ]
 dev = [
     "build>=1,<2",
     "pytest>=8,<9",
+    "tomli; python_version < '3.11'",
 ]
 
 [project.scripts]
-pyWitnessAI = "pyWitnessAI:main"
+pyWitnessAI = "pyWitnessAI.API.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/your-org/pyWitnessAI"
-Issues = "https://github.com/your-org/pyWitnessAI/issues"
+Homepage = "https://github.com/Damien-WangZehou/pyWitnessAI"
+Repository = "https://github.com/Damien-WangZehou/pyWitnessAI"
+Issues = "https://github.com/Damien-WangZehou/pyWitnessAI/issues"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -70,15 +103,22 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["pyWitnessAI*"]
+namespaces = false
 
 # Package data declared with paths relative to the package root (not "src/...").
 [tool.setuptools.package-data]
 pyWitnessAI = [
-  "FaceNet_Model/FACE-DETECT.h5",
-  "OpenCV_Models/*.xml"
+  "Local_Models/OpenCV_Models/*.xml"
 ]
+
+[tool.setuptools.exclude-package-data]
+pyWitnessAI = ["Local_Models/*.h5"]
 
 # setuptools_scm: derive version from Git; fallback if no tags are available.
 [tool.setuptools_scm]
 fallback_version = "0.0.1"
 write_to = "src/pyWitnessAI/_version.py"
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+pythonpath = ["src", "."]

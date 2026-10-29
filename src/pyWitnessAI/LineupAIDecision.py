@@ -21,20 +21,9 @@ class LineupAIDecision:
         self.target = target
 
     @staticmethod
-    def _role_map_from_lineuploader(lineup_loader) -> Dict[str, str]:
-        """
-        Map image base name ->
-        role: {'guilty_suspect'|'innocent_suspect'|'filler'}
-        """
-        role_map = {}
-
-        if lineup_loader.perp_name:
-            role_map[lineup_loader.perp_name] = "guilty_suspect"
-        if lineup_loader.innocent_name:
-            role_map[lineup_loader.innocent_name] = "innocent_suspect"
-        for _ in lineup_loader.filler_names:
-            role_map[_] = "filler"
-        return role_map
+    def _role_map_from_lineup(lineup) -> Dict[str, str]:
+        """Return explicit roles for the members of one built lineup."""
+        return dict(lineup.roles)
 
     @staticmethod
     def _response_type(name: Optional[str], roles: Dict[str, str]) -> ResponseType:
@@ -53,11 +42,11 @@ class LineupAIDecision:
         """
         Return (index of min value, min value); if empty, return (None, inf.)
         """
-        s = series
+        s = series.replace([float("inf"), float("-inf")], float("nan")).dropna()
 
         if allow is not None:
-            s = s.loc[allow]
-        if s.empty or s.isna().all():
+            s = s.loc[s.index.intersection(allow, sort=False)]
+        if s.empty:
             return None, float("inf")
         idx = s.idxmin()
         return idx, float(s.loc[idx])
@@ -97,6 +86,7 @@ class LineupAIDecision:
         Return macro table fields:
           filler_min, TA_selected/TP_selected, TA_responseType/TP_responseType, TA_conf/TP_conf
         """
+        _require_research_roles(roles)
         # 1. Find min lineup member for each probe (each column)
         per_member_min = sim_df.min(axis=0)
 
@@ -106,17 +96,17 @@ class LineupAIDecision:
         filler_names = [k for k, v in roles.items() if v == "filler"]
 
         # 3. Find the min filler distance
-        filler_min_val = float(per_member_min.loc[filler_names].min()) if filler_names else float("inf")
+        filler_min_val = float(per_member_min.reindex(filler_names).min()) if filler_names else float("inf")
 
         # 4.1. TA: The minimum among all except the guilty suspect
-        allow_TA = per_member_min.index.difference([guilty_name]) if guilty_name in per_member_min.index else per_member_min.index
+        allow_TA = per_member_min.index.difference([guilty_name], sort=False) if guilty_name in per_member_min.index else per_member_min.index
         TA_sel, TA_conf = self._min_choice(per_member_min, allow=allow_TA)
         if TA_conf >= self.threshold:
             TA_sel = None
         TA_rt = self._response_type(TA_sel, roles)
 
         # 4.2. TP: The minimum among all except the innocent suspect
-        allow_TP = per_member_min.index.difference([innocent_name]) if innocent_name in per_member_min.index else per_member_min.index
+        allow_TP = per_member_min.index.difference([innocent_name], sort=False) if innocent_name in per_member_min.index else per_member_min.index
         TP_sel, TP_conf = self._min_choice(per_member_min, allow=allow_TP)
         if TP_conf >= self.threshold:
             TP_sel = None
@@ -138,24 +128,18 @@ class LineupAIDecision:
         Return:
           filler_min, selected, responseType, confidence
         """
+        _require_research_roles(roles)
         per_member_min = sim_df.min(axis=0)
         filler_names = [k for k,v in roles.items() if v=="filler"]
         guilty_name = next((k for k,v in roles.items() if v=="guilty_suspect"), None)
         innocent_name = next((k for k,v in roles.items() if v=="innocent_suspect"), None)
-        filler_min_val = float(per_member_min.loc[filler_names].min()) if filler_names else float("inf")
+        filler_min_val = float(per_member_min.reindex(filler_names).min()) if filler_names else float("inf")
 
         if self.targetLineup == "targetPresent":
-            # Allow all members except innocent (or only specified guilty)
-            allow = per_member_min.index.difference([innocent_name]) if innocent_name else per_member_min.index
-            if self.target is not None:
-                # If target is specified, only allow the target
-                allow = per_member_min.index.intersection([self.target])
+            allow = per_member_min.index.difference([innocent_name], sort=False) if innocent_name else per_member_min.index
 
         elif self.targetLineup == "targetAbsent":
-            # Allow all members except guilty (or only specified innocent)
-            allow = per_member_min.index.difference([guilty_name]) if guilty_name else per_member_min.index
-            if self.target is not None:
-                allow = per_member_min.index.intersection([self.target])
+            allow = per_member_min.index.difference([guilty_name], sort=False) if guilty_name else per_member_min.index
         else:
             raise ValueError("targetLineup must be 'targetPresent' or 'targetAbsent'")
 
@@ -170,8 +154,10 @@ class LineupAIDecision:
             "confidence": (None if sel is None else conf),
         }
 
-    def decide_for_pipeline(self, sim_df: pd.DataFrame, lineup_loader) -> Dict[str, object]:
-        roles = self._role_map_from_lineuploader(lineup_loader)
+    def decide_for_pipeline(self, sim_df: pd.DataFrame, lineup) -> Dict[str, object]:
+        if lineup.target == "unknown":
+            raise ValueError("TP/TA decisions require known target presence; an unknown reconstruction lineup cannot be scored.")
+        roles = self._role_map_from_lineup(lineup)
         has_guilty = any(v=="guilty_suspect" for v in roles.values())
         has_innocent = any(v=="innocent_suspect" for v in roles.values())
 
@@ -184,7 +170,7 @@ class LineupAIDecision:
             # just do a simple min choice among all members
             per_member_min = sim_df.min(axis=0)
             filler_names = [k for k,v in roles.items() if v=="filler"]
-            filler_min_val = float(per_member_min.loc[filler_names].min()) if filler_names else float("inf")
+            filler_min_val = float(per_member_min.reindex(filler_names).min()) if filler_names else float("inf")
             sel, conf = self._min_choice(per_member_min)
             if conf >= self.threshold:
                 sel = None
@@ -213,26 +199,6 @@ class LineupAIDecision:
         return self.decide_tp_or_ta(sim_df, roles)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+def _require_research_roles(roles: Dict[str, str]) -> None:
+    if "candidate" in roles.values():
+        raise ValueError("TP/TA decisions require known target presence; neutral candidates cannot be scored.")

@@ -1,0 +1,22 @@
+# Include new source, docs, and regression tests even before Git tracks them.
+include README.md pyproject.toml MANIFEST.in
+recursive-include src/pyWitnessAI *.py *.xml *.json
+prune docs
+recursive-include docs *.md
+prune test
+recursive-include test *.py
+recursive-include test/fixtures *.png *.md
+
+# Studies and their tests belong to the repository, not the library distribution.
+prune studies
+prune data
+prune src/notebooks
+prune tutorial
+prune build
+prune dist
+prune .idea
+prune .pytest_cache
+global-exclude *.ipynb *.py[cod]
+
+# The unused local FaceNet model stays in the source checkout, not releases.
+exclude src/pyWitnessAI/Local_Models/FACE-DETECT.h5

@@ -1,9 +1,14 @@
+import os
+
 import cv2 as cv
+import numpy as np
+import pandas as pd
+from PIL import Image
 from typing import List, Optional, Literal
 from dataclasses import dataclass
 
-from .ImagesAI import *
-from .Lineup import Lineup
+from .Images import Images
+from .LineupBuilder import Lineup
 from .LineupAIDecision import LineupAIDecision
 
 
@@ -33,173 +38,138 @@ def export_for_pywitness(
     """
     Convert a long-form pipeline CSV into a minimal pyWitness-ready CSV.
 
-    Input expectations: Columns include the per-frame summary fields (TA_responseType, TP_responseType, TA_conf, TP_conf)
+    Input expectations: Per-frame TP/TA response and confidence summary fields.
 
     Parameters
     ------
-    input_csv: Path to the pipeline CSV file.
-    output_csv: Where to write the new CSV. If None, will write next to input as '*_pywitness.csv'.
+    df: Pipeline results, either long or wide.
+    output_csv: Where to write the new CSV.
     targetLineup : {'targetPresent','targetAbsent','both'}
         - 'targetPresent'   -> use TP_responseType / TP_conf
         - 'targetAbsent'    -> use TA_responseType / TA_conf
         - 'both'            -> split each input record into TWO output rows (TP and TA)
-    lineupSize: Number written into the `lineupSize` column for every output row.
+    lineupSize: Number of compared members. A paired TP/TA comparison containing
+        both suspect roles excludes the other suspect from each output lineup.
 
     Output schema:
         responseType, confidence, targetLineup, lineupSize
     """
     if targetLineup is None:
         targetLineup = "both"
+    if targetLineup not in ("targetPresent", "targetAbsent", "both"):
+        raise ValueError("targetLineup must be 'targetPresent', 'targetAbsent', or 'both'.")
+    if isinstance(lineupSize, bool) or not isinstance(lineupSize, int) or lineupSize < 1:
+        raise ValueError("lineupSize must be a positive integer.")
+    candidate_columns = any(str(column).endswith(("[candidate]", "[candidate]]")) for column in df.columns)
+    candidate_roles = "role" in df.columns and df["role"].eq("candidate").any()
+    unknown_target = any(column in df.columns and df[column].eq("unknown").any()
+                         for column in ("target", "targetLineup"))
+    if candidate_columns or candidate_roles or unknown_target:
+        raise ValueError("pyWitness TP/TA export requires known target presence; unknown candidates cannot be exported as research outcomes.")
 
     # Sanity checks
-    need_cols = {"TA_responseType","TP_responseType","TA_conf","TP_conf"}
+    prefixes = ("TP", "TA") if targetLineup == "both" else (
+        "TP" if targetLineup == "targetPresent" else "TA",
+    )
+    need_cols = {f"{prefix}_{field}" for prefix in prefixes for field in ("responseType", "conf")}
     missing = [c for c in need_cols if c not in df.columns]
     if missing:
         raise ValueError(f"Input CSV is missing required columns: {missing}")
 
-    has_guilty = False
-    has_innocent = False
-
-    # Check if guilty_suspect and innocent_suspect exist in the data
+    # Paired comparisons may carry either long-form roles or wide distance labels.
     cols = [str(c) for c in df.columns]
-    dist_cols = [c for c in cols if c.startswith("dist[")]
-    if dist_cols:
-        has_guilty   = any("[guilty_suspect]"   in c for c in dist_cols)
-        has_innocent = any("[innocent_suspect]" in c for c in dist_cols)
+    has_guilty = any(c.endswith("[guilty_suspect]") or c.endswith("[guilty_suspect]]") for c in cols)
+    has_innocent = any(c.endswith("[innocent_suspect]") or c.endswith("[innocent_suspect]]") for c in cols)
 
     # When data is not wide-form, check "role" column
-    if ("role" in df.columns) and (not dist_cols):
+    if "role" in df.columns:
         unique_roles = set(df["role"].dropna().unique().tolist())
         has_guilty   = has_guilty   or ("guilty_suspect"   in unique_roles)
         has_innocent = has_innocent or ("innocent_suspect" in unique_roles)
 
-    effective_lineup_size_both = int(lineupSize) - 1 if (targetLineup == "both") else int(lineupSize)
-    # Avoid non-positive lineup size
-    if effective_lineup_size_both < 1:
-        effective_lineup_size_both = 1
+    effective_lineup_size = lineupSize - int(has_guilty and has_innocent)
+    if effective_lineup_size < 1:
+        raise ValueError("A paired comparison requires both suspects and at least two members.")
 
     # We want one output row per group (frame, probe)
     group_keys = [c for c in ["frame", "probe"] if c in df.columns]
+    summary_columns = [c for c in ("TA_responseType", "TP_responseType", "TA_conf", "TP_conf",
+                                   "responseType", "confidence") if c in df.columns]
     if group_keys:
         summary = (
-            df.groupby(group_keys, as_index=False)[["TA_responseType","TP_responseType","TA_conf","TP_conf"]]
+            df.groupby(group_keys, as_index=False)[summary_columns]
               .first()
         )
     else:
-        # If neither frame nor probe exists, just take the first row
-        summary = df[["TA_responseType","TP_responseType","TA_conf","TP_conf"]].drop_duplicates().head(1)
-        summary["__dummy__"] = 0
-        group_keys = ["__dummy__"]
-
-    def _fallback(row):
-        base_resp = row.get("responseType")
-        base_conf = row.get("confidence")
-        resp = (base_resp if pd.notna(base_resp) else "fillerId")
-        if pd.notna(base_conf):
-            conf = float(base_conf)
-        else:
-            conf = float(no_face_fill if no_face_fill is not None else 50.0)
-        return resp, conf
+        summary = df[summary_columns].drop_duplicates()
 
     out_rows = []
-
-    def emit_row(resp: str, conf, tl: str, lineup_size=None):
-        out_rows.append({
-            "responseType": resp if pd.notna(resp) else None,
-            "confidence":   float(conf) if pd.notna(conf) else None,
-            "targetLineup": tl,
-            "lineupSize":   int(lineup_size if lineup_size is not None else lineupSize),
-        })
-
-    # For each summary row, emit one or two output rows depending on targetLineup
     for _, row in summary.iterrows():
-        ta_resp, ta_conf = row.get("TA_responseType"), row.get("TA_conf")
-        tp_resp, tp_conf = row.get("TP_responseType"), row.get("TP_conf")
-
-        # Check if both TA and TP responses are missing
-        is_no_face_like = (pd.isna(ta_resp) and pd.isna(tp_resp) and pd.isna(ta_conf) and pd.isna(tp_conf))
-
-        if targetLineup == "targetPresent":
-            resp, conf = (tp_resp, tp_conf)
-            if pd.isna(resp) or pd.isna(conf):
-                if is_no_face_like:
-                    resp, conf = _fallback(row)
-            emit_row(resp, conf, "targetPresent")
-
-        elif targetLineup == "targetAbsent":
-            resp, conf = (ta_resp, ta_conf)
-            if pd.isna(resp) or pd.isna(conf):
-                if is_no_face_like:
-                    resp, conf = _fallback(row)
-            emit_row(resp, conf, "targetAbsent")
-
-        elif targetLineup == "both":
-            resp_tp, conf_tp = (tp_resp, tp_conf)
-            if pd.isna(resp_tp) or pd.isna(conf_tp):
-                if is_no_face_like:
-                    resp_tp, conf_tp = _fallback(row)
-            emit_row(resp_tp, conf_tp, "targetPresent", effective_lineup_size_both)
-
-            resp_ta, conf_ta = (ta_resp, ta_conf)
-            if pd.isna(resp_ta) or pd.isna(conf_ta):
-                if is_no_face_like:
-                    resp_ta, conf_ta = _fallback(row)
-            emit_row(resp_ta, conf_ta, "targetAbsent", effective_lineup_size_both)
-
-        else:
-            raise ValueError("targetLineup must be 'targetPresent', 'targetAbsent', or 'both'.")
+        # Legacy no-face records may only carry the generic summary fields.
+        no_face = all(pd.isna(row.get(column)) for column in (
+            "TA_responseType", "TP_responseType", "TA_conf", "TP_conf",
+        ))
+        for prefix in prefixes:
+            response, confidence = row.get(f"{prefix}_responseType"), row.get(f"{prefix}_conf")
+            if no_face:
+                response, confidence = row.get("responseType"), row.get("confidence")
+                response = response if pd.notna(response) else "fillerId"
+                if pd.isna(confidence) and response != "rejectId":
+                    confidence = no_face_fill if no_face_fill is not None else 50.0
+            out_rows.append({
+                "responseType": response if pd.notna(response) else None,
+                "confidence": float(confidence) if pd.notna(confidence) else None,
+                "targetLineup": "targetPresent" if prefix == "TP" else "targetAbsent",
+                "lineupSize": effective_lineup_size,
+            })
 
     out = pd.DataFrame(out_rows, columns=["responseType","confidence","targetLineup","lineupSize"])
 
     if output_csv is None:
         output_csv = "videoLineupResults_pywitness.csv"
 
+    directory = os.path.dirname(output_csv)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
     out.to_csv(output_csv, index=False)
     return output_csv
 
 
 class VideoLineupPipeline:
-    """
-    For each frame:
-      - Row data: frame + lineup member distances + TA/TP summary (if identifier is set)
-      - Distance is calculated by ImageAnalyzer between detected faces and lineup members
-      - Summary is calculated by LineupIdentifier from the distance matrix
-    """
+    """Compare video faces to a built Lineup and summarize its TP/TA decisions."""
 
     def __init__(self,
                  video_path: str,
                  lineup: Lineup,
-                 cfg: PipelineConfig | dict = PipelineConfig()):
+                 cfg: PipelineConfig | dict | None = None):
+        if not isinstance(lineup, Lineup):
+            raise TypeError("lineup must be a Lineup returned by LineupBuilder.build().")
+        if lineup.target == "unknown":
+            raise ValueError("VideoLineupPipeline requires known target presence; an unknown reconstruction lineup cannot produce TP/TA statistics.")
         self.video_path = video_path
-        self.lineup_loader = lineup
+        self.lineup = lineup
 
-        if isinstance(cfg, dict):
+        if cfg is None:
+            self.cfg = PipelineConfig()
+        elif isinstance(cfg, dict):
             self.cfg = PipelineConfig(**cfg)
         elif isinstance(cfg, PipelineConfig):
             self.cfg = cfg
         else:
-            raise TypeError("cfg must be a PipelineConfig or dict")
+            raise TypeError("cfg must be a PipelineConfig, dict, or None")
 
-        # Identifier used to be a choice, now it is always enabled
-        self.identifier_obj = LineupAIDecision()
+        self.identifier_obj = LineupAIDecision(targetLineup=self._target_lineup)
         self.identifier_enabled = True
-        # identifier: Optional[LineupIdentifier] = None
-        # # Normalize identifier switch/object
-        # if isinstance(identifier, LineupIdentifier):
-        #     self.identifier_obj: Optional[LineupIdentifier] = identifier
-        #     self.identifier_enabled: bool = True
-        # elif identifier is True:
-        #     self.identifier_obj = LineupIdentifier()  # default threshold/targetLineup/target
-        #     self.identifier_enabled = True
-        # else:
-        #     self.identifier_obj = None
-        #     self.identifier_enabled = False
 
-        # Initialize the lineup rows from LineupLoader
-        self._row_il = Images([*self.lineup_loader.lineup])  # paths -> PIL
-        # Roles map: image base name -> role
-        self.roles = LineupAIDecision._role_map_from_lineuploader(self.lineup_loader)
+        # Keep presentation order and neutral IDs, including in-memory portraits.
+        self._row_il = Images([])
+        self._row_il.images = dict(lineup.images)
+        self._row_il.path_to_images = {
+            name: path or f"{name}.png" for name, path in lineup.source_paths.items()
+        }
+        self.roles = dict(lineup.roles)
 
+        from .ImagesAI import ImagesAI
         self._analyzer_template = ImagesAI(
             column_images=Images([]),
             row_images=self._row_il,
@@ -212,115 +182,11 @@ class VideoLineupPipeline:
             show_progress=self.cfg.show_progress
         )
 
-    def _has_face(self, pil_img: Image.Image) -> bool:
-        """
-        Face presence check that matches the configured analyzer_method:
-        - process_georgia_pipeline -> MTCNN (facenet-pytorch)
-        - process/process_verify   -> DeepFace.represent(detector_backend=cfg.backend)
-        - fallback                 -> DeepFace.extract_faces
-        Returns True if at least one face is detected, else False.
-        """
-        method = getattr(self.cfg, "analyzer_method", "process")
-        backend = getattr(self.cfg, "backend", "mtcnn")
-        show = bool(getattr(self.cfg, "show_progress", False))
-
-        # Helper: silence stdout/stderr when show_progress is False
-        def _maybe_silent(callable_, *args, **kwargs):
-            if show:
-                return callable_(*args, **kwargs)
-            with io.StringIO() as _buf1, io.StringIO() as _buf2, redirect_stdout(_buf1), redirect_stderr(_buf2):
-                return callable_(*args, **kwargs)
-
-        # 1. Georgia pipeline: use MTCNN detection
-        # Ensure analyzer's mtcnn exists and matches current show_progress
-        if method == "process_georgia_pipeline":
-            try:
-                # Recreate MTCNN if show_progress changed
-                boxes, probs = self._analyzer_template.mtcnn.detect(pil_img)
-                if boxes is None or probs is None:
-                    return False
-                return True
-                w, h = pil_img.size
-                img_area = float(w * h)
-                for (x1, y1, x2, y2), p in zip(boxes, probs):
-                    if p is None:
-                        continue
-                    area = max(0.0, (x2 - x1)) * max(0.0, (y2 - y1))
-                    if (p >= 0.90) and (0.01 * img_area <= area <= 0.80 * img_area):
-                        return True
-                return False
-            except Exception:
-                return False
-
-        # 2 DeepFace.represent path for process / process_verify
-        if method in ("process", "process_verify"):
-            try:
-                arr = np.array(pil_img)
-                # Use represent to keep consistent with analyzer settings
-                reps = _maybe_silent(
-                    DeepFace.represent,
-                    arr,
-                    model_name=self._analyzer_template.model,
-                    detector_backend=backend,
-                    enforce_detection=self._analyzer_template.enforce_detection,
-                    align=self._analyzer_template.align,
-                    normalization=self._analyzer_template.normalization
-                )
-                if not reps:
-                    return False
-
-                return True
-                # If there is facial_area/region info, use it to filter out too small/large faces
-                w, h = pil_img.size
-                img_area = float(w * h)
-                min_area = 0.01 * img_area
-                max_area = 0.80 * img_area
-                ok = False
-                for r in reps:
-                    fa = r.get("facial_area") or r.get("region") or {}
-                    if isinstance(fa, dict):
-                        rw = float(fa.get("w", 0.0))
-                        rh = float(fa.get("h", 0.0))
-                        area = rw * rh
-                        if min_area <= area <= max_area:
-                            ok = True
-                            break
-                    else:
-                        # If no region info, just accept it
-                        ok = True
-                        break
-                return ok
-            except Exception:
-                return False
-
-        # 3 Fallback: DeepFace.extract_faces
-        try:
-            arr = np.array(pil_img)
-            faces = _maybe_silent(
-                DeepFace.extract_faces,
-                img_path=arr,
-                detector_backend=backend,
-                enforce_detection=False
-            ) or []
-            if not faces:
-                return False
-            return True
-            w, h = pil_img.size
-            img_area = float(w * h)
-            min_area = 0.01 * img_area
-            max_area = 0.80 * img_area
-            for f in faces:
-                conf = float(f.get("confidence", 0.0))
-                region = f.get("facial_area") or f.get("region") or {}
-                if isinstance(region, dict):
-                    area = float(region.get("w", 0.0)) * float(region.get("h", 0.0))
-                else:
-                    area = 0.0
-                if (conf >= 0.90) and (min_area <= area <= max_area):
-                    return True
-            return False
-        except Exception:
-            return False
+    @property
+    def _target_lineup(self) -> str:
+        if self.lineup.target == "unknown":
+            raise ValueError("TP/TA statistics require known target presence.")
+        return "targetPresent" if self.lineup.target == "present" else "targetAbsent"
 
     def _faces_from_frame(self, frame_bgr: np.ndarray) -> List[Image.Image]:
         """
@@ -355,6 +221,8 @@ class VideoLineupPipeline:
 
         else:
             # DeepFace path for process / process_verify / fallback
+            from deepface import DeepFace
+
             try:
                 dets = DeepFace.extract_faces(
                     img_path=np.array(pil),
@@ -410,30 +278,34 @@ class VideoLineupPipeline:
             "TP_conf": None,
         }
         base.update(summary or {})
+        prefix = "TP" if self.lineup.target == "present" else "TA"
+        for field, source in (("selected", "selected"), ("responseType", "responseType"), ("conf", "confidence")):
+            if base[f"{prefix}_{field}"] is None:
+                base[f"{prefix}_{field}"] = base[source]
         return base
 
     def _decide_summary(self, sim_df: pd.DataFrame) -> dict[str, object]:
-        """
-        Decide the summary for the frame based on the identifier settings and roles.
-        Choices: decide_macro, decide_tp_or_ta, decide (simple)
-        """
+        """Decide using the built lineup's explicit member roles and scenario."""
         if not self.identifier_enabled or self.identifier_obj is None:
             return {}
+        return self._normalize_summary(self.identifier_obj.decide_for_pipeline(sim_df, self.lineup))
 
-        roles = self.roles
-        has_guilty = any(v == "guilty_suspect" for v in roles.values())
-        has_innocent = any(v == "innocent_suspect" for v in roles.values())
-
-        # Case1: no targetLineup, both guilty and innocent exist -> macro
-        if self.identifier_obj.targetLineup is None and has_guilty and has_innocent:
-            return self._normalize_summary(self.identifier_obj.decide_macro(sim_df, roles))
-
-        # Case2: targetLineup is set to TP/TA -> TP/TA strategy
-        if self.identifier_obj.targetLineup in ("targetPresent", "targetAbsent"):
-            return self._normalize_summary(self.identifier_obj.decide_tp_or_ta(sim_df, roles))
-
-        # Case3: neither guilty nor innocent exists, or only one exists but targetLineup is not set
-        return self._normalize_summary(self.identifier_obj.decide_for_pipeline(sim_df, self.lineup_loader))
+    def _no_face_records(self, frame: int) -> list[dict]:
+        distance = float(self.cfg.no_face_fill)
+        summary = self._normalize_summary({
+            "filler_min": distance,
+            "selected": None,
+            "responseType": "fillerId",
+            "confidence": distance,
+        }) if self.identifier_enabled else {}
+        return [{
+            "frame": frame,
+            "probe": f"frame{frame}_noface",
+            "lineup_member": name,
+            "distance": distance,
+            "role": role,
+            **summary,
+        } for name, role in self.roles.items()]
 
     def _long_to_wide(self, df: pd.DataFrame, by=("frame", "probe"),
                       include_role_mins=True,
@@ -488,9 +360,14 @@ class VideoLineupPipeline:
             frame_end: Optional[int] = None,
             frame_stride: int = 1):
         cap = cv.VideoCapture(self.video_path)
-        if not cap.isOpened():
-            raise RuntimeError(f"Cannot open video: {self.video_path}")
+        try:
+            if not cap.isOpened():
+                raise RuntimeError(f"Cannot open video: {self.video_path}")
+            return self._run_capture(cap, frame_start, frame_end, frame_stride)
+        finally:
+            cap.release()
 
+    def _run_capture(self, cap, frame_start: int, frame_end: Optional[int], frame_stride: int):
         n_frames = int(cap.get(cv.CAP_PROP_FRAME_COUNT)) or 0
         if n_frames <= 0:
             n_frames = 10 ** 12
@@ -561,29 +438,7 @@ class VideoLineupPipeline:
             # If analyzer template is missing (e.g., tests bypass __init__), fall back to no-face logic
             analyzer = getattr(self, "_analyzer_template", None)
             if analyzer is None:
-                noface_probe = f"frame{logical_frame_idx}_noface"
-                for lm_path in self.lineup_loader.lineup:
-                    lm_name = lm_path.split("/")[-1].split("\\")[-1].rsplit(".", 1)[0]
-                    role = self.roles.get(lm_name, "filler")
-
-                    base_row = {
-                        "frame": logical_frame_idx,
-                        "probe": noface_probe,
-                        "lineup_member": lm_name,
-                        "distance": float(self.cfg.no_face_fill),
-                        "role": role,
-                    }
-
-                    if self.identifier_enabled:
-                        summary = self._normalize_summary({
-                            "filler_min": float(self.cfg.no_face_fill),
-                            "selected": None,
-                            "responseType": "fillerId",
-                            "confidence": float(self.cfg.no_face_fill),
-                        })
-                        records.append({**base_row, **summary})
-                    else:
-                        records.append(base_row)
+                records.extend(self._no_face_records(logical_frame_idx))
                 continue
 
             analyzer.column_images = col_il
@@ -599,29 +454,7 @@ class VideoLineupPipeline:
             no_valid_dist = (sim_df.empty) or (sim_df.isna().all().all())
 
             if no_valid_dist:
-                noface_probe = f"frame{logical_frame_idx}_noface"
-                for lm_path in self.lineup_loader.lineup:
-                    lm_name = lm_path.split("/")[-1].split("\\")[-1].rsplit(".", 1)[0]
-                    role = self.roles.get(lm_name, "filler")
-
-                    base_row = {
-                        "frame": logical_frame_idx,
-                        "probe": noface_probe,
-                        "lineup_member": lm_name,
-                        "distance": float(self.cfg.no_face_fill),
-                        "role": role,
-                    }
-
-                    if self.identifier_enabled:
-                        summary = self._normalize_summary({
-                            "filler_min": float(self.cfg.no_face_fill),
-                            "selected": None,
-                            "responseType": "fillerId",
-                            "confidence": float(self.cfg.no_face_fill),
-                        })
-                        records.append({**base_row, **summary})
-                    else:
-                        records.append(base_row)
+                records.extend(self._no_face_records(logical_frame_idx))
                 continue
 
             # Gneral case: at least one face with valid distances
@@ -644,12 +477,8 @@ class VideoLineupPipeline:
                     else:
                         records.append(base_row)
 
-        cap.release()
         df = pd.DataFrame.from_records(records)
-        wide: bool = True
-        if wide:
-            df = self._long_to_wide(df, by=("frame", "probe"))
-        return df
+        return self._long_to_wide(df, by=("frame", "probe")) if not df.empty else df
 
     def save(self, df: pd.DataFrame, output_csv: str = "videoLineupResults.csv"):
         """
@@ -669,27 +498,20 @@ class VideoLineupPipeline:
     def savepywitness(self,
                       df: pd.DataFrame,
                       output_csv: str = "videoLineupResults_pywitness.csv",
-                      targetLineup: Literal["targetPresent", "targetAbsent", "both"] = "both",
+                      targetLineup: Optional[Literal["targetPresent", "targetAbsent"]] = None,
                       lineupSize: Optional[int] = None):
         """
-        Save a pyWitness-compatible CSV from the pipeline dataframe.
+        Save results using the built lineup's target condition and member count.
         """
         if df is None or df.empty:
             raise ValueError("DataFrame is None or empty.")
+        check_target = targetLineup or self._target_lineup
+        if check_target != self._target_lineup:
+            raise ValueError("targetLineup must match the built lineup; build and run TP and TA lineups separately.")
         if lineupSize is None:
-            lineupSize = len(self.lineup_loader.lineup)
+            lineupSize = len(self.lineup)
 
-        dirpath = os.path.dirname(output_csv)
-        if dirpath:
-            os.makedirs(dirpath, exist_ok=True)
-
-        check_target = (
-            self.identifier_obj.targetLineup
-            if (self.identifier_obj and self.identifier_obj.targetLineup in ("targetPresent", "targetAbsent"))
-            else (targetLineup or "both")
-        )
-
-        export_for_pywitness(
+        result = export_for_pywitness(
             df=df,
             output_csv=output_csv,
             targetLineup=check_target,
@@ -697,6 +519,7 @@ class VideoLineupPipeline:
             no_face_fill=float(self.cfg.no_face_fill)
         )
         print(f"Saved pipeline results to {output_csv}")
+        return result
 
     def plot_role_histograms(self, df: pd.DataFrame,
                              roles=("filler", "guilty_suspect", "innocent_suspect"),
