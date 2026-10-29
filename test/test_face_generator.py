@@ -122,7 +122,7 @@ def test_witness_lineup_uses_simple_single_portrait_prompts(
         "Make a photo of a man based on this image, with the following features: "
         if use_reference else
         "Make a photo of an under average-looking man, with facial features "
-        "and hair style completely different from those of the other people in the lineup, "
+        "and hair style completely different from each other, "
         "but matching the following description: "
     )
     expected = (

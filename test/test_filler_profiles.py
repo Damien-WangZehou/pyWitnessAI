@@ -124,7 +124,8 @@ def test_omitting_profiles_preserves_existing_prompt_and_empty_profile_metadata(
     explicit_none = FaceGenerator(backend, tmp_path / "explicit_none", filler_profiles=None, **options)
 
     assert ordinary.generation_prompts() == explicit_none.generation_prompts()
-    assert all("other people in the lineup" in prompt for prompt in ordinary.generation_prompts())
+    assert all("facial features and hair style completely different from each other" in prompt
+               for prompt in ordinary.generation_prompts())
     assert all("Additional design requirements" not in prompt for prompt in ordinary.generation_prompts())
     results = ordinary.generate()
     assert all(result.filler_profile == "" for result in results)
