@@ -92,6 +92,8 @@ _EXPORTS_BY_MODULE = {
         "create_image_generation_backend", "register_image_generation_backend",
     ),
     "API.openai": ("OpenAIImageBackend",),
+    "prompt_processing": ("PromptProcessor", "PromptProcessingRequest", "PromptProcessingResult"),
+    "API.openai_prompt_processor": ("OpenAIPromptProcessor",),
     "GeneratedFaceDataset": (
         "GeneratedFaceDataset", "DEFAULT_GENERATED_FACE_DATASET_ROOT",
         "DatasetMatchMode", "SCHEMA_COLUMNS",

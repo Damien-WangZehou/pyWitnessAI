@@ -9,6 +9,13 @@ from typing import Callable, Iterable, Literal, Mapping, Sequence
 AttributeParser = Callable[[str], str | None]
 PromptRole = Literal["subject", "detail"]
 
+_PORTRAIT_INSTRUCTIONS = (
+    "Make it an image portrait, only from shoulders above. "
+    "Make the background gray. "
+    "The people should be looking at the camera with frontal face. "
+    "Do not emphasize or depict body actions, hand placement, or clothing interactions."
+)
+
 __all__ = [
     "DEFAULT_FACE_ATTRIBUTE_SCHEMA",
     "FaceAttributeDefinition",
@@ -143,23 +150,30 @@ class FaceDescriptionSchema:
         custom = [value for _, value in self.custom_attributes]
         return [text for text in detail_fields if text] + custom + list(self.other_details)
 
-    def to_generation_prompt(self, variation: str | None = None) -> str:
-        details = self.detail_phrases()
+    def to_generation_prompt(
+        self, variation: str | None = None, *, description: str | None = None,
+    ) -> str:
+        """Build one portrait prompt, optionally using authoritative parser text."""
+        if description is None:
+            details = self.detail_phrases()
+            if self.attribute_values():
+                description = self.subject_phrase()
+                if details:
+                    description += " with " + ", ".join(details)
+            else:
+                description = "; ".join(filter(None, (self.original_description, *details)))
         if variation:
-            details.append(variation)
+            description = "; ".join(filter(None, (description, variation)))
 
+        subject = {"female": "woman", "non-binary": "person"}.get(self.gender, "man")
         prompt = (
-            "Photorealistic synthetic fictional adult face portrait, "
-            f"{self.subject_phrase()}"
+            f"Make a photo of an under average-looking {subject}, with facial features "
+            "and hair style completely different from each other"
         )
-        if details:
-            prompt += " with " + ", ".join(details)
-        prompt += (
-            ", frontal face, centered crop, shoulders visible, plain light gray studio background, "
-            "even soft lighting, neutral camera angle, realistic skin texture, high detail, "
-            "not a real person, not a celebrity."
-        )
-        return prompt
+        if description:
+            prompt += f", but matching the following description: {description}"
+        prompt = prompt.rstrip(". ") + ". "
+        return prompt + _PORTRAIT_INSTRUCTIONS
 
 
 def _combine_attribute_labels(values: tuple[str | None, ...], *, noun: str) -> str | None:

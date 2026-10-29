@@ -25,7 +25,8 @@ from .model_files import file_sha256
 
 __all__ = ["FaceStandardizer", "StandardizedFace"]
 
-_VERSION = "portrait-v3"
+_VERSION = "portrait-v5"
+_FALLBACK_BACKGROUND = (224, 224, 224)
 _YUNET_URL = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 _YUNET_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
 _U2NET_URL = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net_human_seg.onnx"
@@ -43,7 +44,7 @@ class StandardizedFace:
 
 
 class FaceStandardizer:
-    """Align and crop portraits; optionally remove backgrounds or cap detail.
+    """Center-crop portraits; optionally align eyes, remove backgrounds or cap detail.
 
     ``run(folder_or_manifest, output_dir)`` returns an ImageCatalog and saves a
     manifest, configuration, PNG portraits, and masks. Use a new/empty output
@@ -54,7 +55,10 @@ class FaceStandardizer:
     L mask (0 background, 255 foreground). Backgrounds are retained by default;
     ``remove_background=True`` enables segmentation with local U2Net or the
     supplied segmenter. An explicitly supplied mask also enables masking.
-    Imports/downloads are lazy; alignment uses local YuNet.
+    Basic center crops use no models. Supplying ``eye_distance`` in center mode
+    sets the eye-based scale about the image center without rotating the image.
+    ``alignment="eyes"`` enables eye alignment
+    using local YuNet. ``background="auto"`` estimates a fill color per image.
     An optional enhancer(image, *, landmarks) returns same-size RGB pixels;
     both routes share original measurements and all enhanced outputs need review.
     """
@@ -63,9 +67,10 @@ class FaceStandardizer:
         self,
         *,
         size: tuple[int, int] = (256, 320),
-        eye_distance: float = 0.25,
+        alignment: str = "center",
+        eye_distance: float | None = None,
         eye_height: float = 0.47,
-        background: tuple[int, int, int] = (224, 224, 224),
+        background: tuple[int, int, int] | str = "auto",
         remove_background: bool = False,
         detail_eye_distance: float | None = None,
         detector: Callable | None = None,
@@ -75,18 +80,29 @@ class FaceStandardizer:
     ) -> None:
         if len(size) != 2 or any(isinstance(v, bool) or not isinstance(v, int) or v < 32 for v in size):
             raise ValueError("size must contain two integer pixel dimensions >= 32.")
-        if not 0 < eye_distance < 1 or not 0 < eye_height < 1:
-            raise ValueError("eye_distance and eye_height must be fractions between 0 and 1.")
-        if len(background) != 3 or any(isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 255 for v in background):
-            raise ValueError("background must contain three integer RGB values in [0, 255].")
+        if alignment not in ("center", "eyes"):
+            raise ValueError('alignment must be "center" or "eyes".')
+        if eye_distance is not None and not 0 < eye_distance < 1:
+            raise ValueError("eye_distance must be None or a fraction between 0 and 1.")
+        if not 0 < eye_height < 1:
+            raise ValueError("eye_height must be a fraction between 0 and 1.")
+        if isinstance(background, str):
+            if background != "auto":
+                raise ValueError('background must be "auto" or three integer RGB values in [0, 255].')
+        elif (not isinstance(background, (tuple, list)) or len(background) != 3
+              or any(isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 255 for v in background)):
+            raise ValueError('background must be "auto" or three integer RGB values in [0, 255].')
         if not isinstance(remove_background, bool):
             raise TypeError("remove_background must be a bool.")
         if detail_eye_distance is not None and (not np.isfinite(detail_eye_distance) or detail_eye_distance < 8):
             raise ValueError("detail_eye_distance must be None or a finite pixel distance >= 8.")
         if any(value is not None and not callable(value) for value in (detector, segmenter, enhancer)):
             raise TypeError("detector, segmenter, and enhancer must be callables or None.")
-        self.size, self.eye_distance, self.eye_height = tuple(size), float(eye_distance), float(eye_height)
-        self.background = tuple(background)
+        self.size, self.eye_height = tuple(size), float(eye_height)
+        self.eye_distance = (float(eye_distance) if eye_distance is not None else
+                             0.25 if alignment == "eyes" else None)
+        self.alignment = alignment
+        self.background = background if isinstance(background, str) else tuple(background)
         self.remove_background = remove_background
         self.detail_eye_distance = float(detail_eye_distance) if detail_eye_distance is not None else None
         self.detector, self.segmenter = detector, segmenter
@@ -107,21 +123,25 @@ class FaceStandardizer:
         Spatial detail is a sampling ceiling; blur and compression can still differ.
         """
         rgb, alpha = _read_portrait(image)
-        flattened = Image.composite(rgb, Image.new("RGB", rgb.size, self.background), alpha)
-        measurements = landmarks if landmarks is not None else self._detect(flattened)
-        try:
-            points = np.asarray(measurements, dtype=float)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Cannot obtain five numeric facial landmarks.") from exc
-        if points.shape != (5, 2) or not np.isfinite(points).all():
-            raise ValueError("Expected five finite (x, y) landmarks: eyes, nose, mouth corners.")
-        if (points < 0).any() or (points >= np.array(rgb.size)).any():
-            raise ValueError("Landmarks must lie inside the oriented image.")
-        eyes = points[:2][np.argsort(points[:2, 0])]
-        delta = eyes[1] - eyes[0]
-        native_distance = float(np.linalg.norm(delta))
-        if native_distance < 4:
-            raise ValueError("Eye landmarks are coincident or too close to align.")
+        automatic_background = self.background == "auto"
+        background = _estimate_background(rgb, alpha) if automatic_background else self.background
+        flattened = Image.composite(rgb, Image.new("RGB", rgb.size, background), alpha)
+        points = eyes = delta = native_distance = None
+        if landmarks is not None or self._needs_landmarks():
+            measurements = landmarks if landmarks is not None else self._detect(flattened)
+            try:
+                points = np.asarray(measurements, dtype=float)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Cannot obtain five numeric facial landmarks.") from exc
+            if points.shape != (5, 2) or not np.isfinite(points).all():
+                raise ValueError("Expected five finite (x, y) landmarks: eyes, nose, mouth corners.")
+            if (points < 0).any() or (points >= np.array(rgb.size)).any():
+                raise ValueError("Landmarks must lie inside the oriented image.")
+            eyes = points[:2][np.argsort(points[:2, 0])]
+            delta = eyes[1] - eyes[0]
+            native_distance = float(np.linalg.norm(delta))
+            if native_distance < 4:
+                raise ValueError("Eye landmarks are coincident or too close to measure.")
         background_removed = mask is not None or self.remove_background
         if mask is not None:
             foreground, mask_source = mask, "supplied"
@@ -137,20 +157,26 @@ class FaceStandardizer:
         if background_removed:
             if np.count_nonzero(pixels > 127) < 0.01 * pixels.size:
                 raise ValueError("Foreground segmentation is empty or implausibly small.")
-            if any(pixels[int(y), int(x)] < 128 for x, y in points):
+            if points is not None and any(pixels[int(y), int(x)] < 128 for x, y in points):
                 raise ValueError("Foreground mask excludes core facial landmarks; review the segmentation.")
 
-        target_distance = self.eye_distance * self.size[0]
-        matrix = _eye_transform(eyes, target_distance, (self.size[0] / 2, self.eye_height * self.size[1]))
-        aligned_points = points @ matrix[:, :2].T + matrix[:, 2]
-        sampling_distance = min(target_distance, self.detail_eye_distance or target_distance)
-        detail_ratio = sampling_distance / target_distance
+        if self.alignment == "eyes":
+            matrix = _eye_transform(eyes, self.eye_distance * self.size[0],
+                                    (self.size[0] / 2, self.eye_height * self.size[1]))
+        else:
+            requested_scale = self.eye_distance * self.size[0] / native_distance if self.eye_distance is not None else None
+            matrix = _center_transform(rgb.size, self.size, scale=requested_scale)
+        scale = float(np.linalg.norm(matrix[0, :2]))
+        aligned_points = points @ matrix[:, :2].T + matrix[:, 2] if points is not None else None
+        target_distance = native_distance * scale if native_distance is not None else None
+        sampling_distance = min(target_distance, self.detail_eye_distance or target_distance) if target_distance is not None else None
+        detail_ratio = sampling_distance / target_distance if target_distance is not None else 1.0
         aligned_mask = _limit_detail(_warp(foreground, matrix, self.size, 0), detail_ratio)
         flags = _quality_flags(
             pixels, points, aligned_points, np.asarray(aligned_mask), native_distance,
             sampling_distance, matrix, check_foreground=background_removed,
         )
-        portrait = self._render(rgb, foreground, matrix, aligned_mask, detail_ratio)
+        portrait = self._render(rgb, foreground, matrix, aligned_mask, detail_ratio, background)
         baseline = None
         if self.enhancer is not None:
             # Freeze original measurements for both routes; custom models receive copies.
@@ -161,17 +187,22 @@ class FaceStandardizer:
             change = np.asarray(enhanced, dtype=np.int16) - np.asarray(flattened, dtype=np.int16)
             enhanced = Image.fromarray(np.clip(np.asarray(rgb, dtype=np.int16) + change, 0, 255).astype(np.uint8))
             baseline = portrait
-            portrait = self._render(enhanced, foreground, matrix, aligned_mask, detail_ratio)
+            portrait = self._render(enhanced, foreground, matrix, aligned_mask, detail_ratio, background)
             flags.append("enhancement_requires_review")
         metadata = {
             "input_width": rgb.width, "input_height": rgb.height,
+            "alignment": self.alignment,
+            "background_color": json.dumps(list(background)),
+            "background_source": "auto" if automatic_background else "supplied",
             "native_eye_distance": native_distance,
             "output_eye_distance": target_distance,
             "detail_eye_distance": sampling_distance,
-            "scale": target_distance / native_distance,
-            "roll_degrees": float(np.degrees(np.arctan2(delta[1], delta[0]))),
-            "input_landmarks": json.dumps(points.tolist()),
-            "landmark_source": "supplied" if landmarks is not None else _callable_name(self.detector) if self.detector else "YuNet-2023mar",
+            "scale": scale,
+            "roll_degrees": float(np.degrees(np.arctan2(delta[1], delta[0]))) if delta is not None else None,
+            "input_landmarks": json.dumps(points.tolist()) if points is not None else None,
+            "landmark_source": ("supplied" if landmarks is not None else
+                                (_callable_name(self.detector) if self.detector else "YuNet-2023mar")
+                                if points is not None else None),
             "mask_source": mask_source,
             "background_removed": background_removed,
             "transform_matrix": json.dumps(matrix.tolist()),
@@ -181,12 +212,16 @@ class FaceStandardizer:
         }
         return StandardizedFace(portrait, aligned_mask, metadata, baseline)
 
-    def _render(self, rgb, foreground, matrix, aligned_mask, detail_ratio):
-        composite = Image.composite(rgb, Image.new("RGB", rgb.size, self.background), foreground)
-        output = _limit_detail(_warp(composite, matrix, self.size, self.background), detail_ratio)
+    def _needs_landmarks(self) -> bool:
+        return (self.alignment == "eyes" or self.eye_distance is not None
+                or self.enhancer is not None or self.detail_eye_distance is not None)
+
+    def _render(self, rgb, foreground, matrix, aligned_mask, detail_ratio, background):
+        composite = Image.composite(rgb, Image.new("RGB", rgb.size, background), foreground)
+        output = _limit_detail(_warp(composite, matrix, self.size, background), detail_ratio)
         # Exact background away from the soft edge, including after resampling.
         rendered = np.asarray(output).copy()
-        rendered[np.asarray(aligned_mask) == 0] = self.background
+        rendered[np.asarray(aligned_mask) == 0] = background
         portrait = Image.fromarray(rendered)
         portrait.info["icc_profile"] = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
         return portrait
@@ -217,7 +252,7 @@ class FaceStandardizer:
         # Global dependency/model errors surface before creating a partial batch.
         ready = catalog.ready
         if not ready.empty:
-            if "landmarks" not in ready or ready["landmarks"].map(_missing).any():
+            if self._needs_landmarks() and ("landmarks" not in ready or ready["landmarks"].map(_missing).any()):
                 self._load_detector()
             if self.remove_background and ("mask_path" not in ready or ready["mask_path"].map(_missing).any()):
                 self._load_segmenter()
@@ -343,11 +378,13 @@ class FaceStandardizer:
 
     def _recipe(self) -> dict[str, object]:
         recipe = dict(
-            version=_VERSION, size=self.size, eye_distance=self.eye_distance, eye_height=self.eye_height,
+            version=_VERSION, size=self.size, alignment=self.alignment,
+            eye_distance=self.eye_distance, eye_height=self.eye_height,
             background=self.background, remove_background=self.remove_background,
             detail_eye_distance=self.detail_eye_distance,
             color="sRGB; untagged RGB assumed sRGB; no exposure or skin-tone matching",
-            detector=_callable_name(self.detector) if self.detector else "YuNet-2023mar",
+            detector=((_callable_name(self.detector) if self.detector else "YuNet-2023mar")
+                      if self._needs_landmarks() else None),
             segmenter=((_callable_name(self.segmenter) if self.segmenter else "u2net_human_seg")
                        if self.remove_background else None),
             python=platform.python_version(), pillow=pillow_version, numpy=np.__version__,
@@ -395,6 +432,41 @@ def _read_portrait(image) -> tuple[Image.Image, Image.Image]:
     return rgb, alpha
 
 
+def _estimate_background(rgb, alpha):
+    """Use the dominant visible border color, ignoring hidden RGB and outliers."""
+    band = max(1, min(8, round(min(rgb.size) * 0.02)))
+    pixels, opacity = np.asarray(rgb), np.asarray(alpha)
+    border = np.concatenate((pixels[:band].reshape(-1, 3), pixels[-band:].reshape(-1, 3),
+                             pixels[band:-band, :band].reshape(-1, 3),
+                             pixels[band:-band, -band:].reshape(-1, 3)))
+    weights = np.concatenate((opacity[:band].ravel(), opacity[-band:].ravel(),
+                              opacity[band:-band, :band].ravel(),
+                              opacity[band:-band, -band:].ravel()))
+    visible = weights > 0
+    if not visible.any():
+        return _FALLBACK_BACKGROUND
+    border, weights = border[visible], weights[visible].astype(float)
+    quantized = border.astype(np.int32) // 16
+    bins = quantized @ np.array([256, 16, 1])
+    dominant = np.argmax(np.bincount(bins, weights=weights, minlength=4096))
+    selected = bins == dominant
+    border, weights = border[selected], weights[selected]
+    color = []
+    for channel in border.T:
+        order = np.argsort(channel)
+        middle = np.searchsorted(np.cumsum(weights[order]), weights.sum() / 2)
+        color.append(int(channel[order[middle]]))
+    return tuple(color)
+
+
+def _center_transform(source_size, output_size, *, scale=None):
+    """Uniform resize about the image center; cover the output if scale is unset."""
+    if scale is None:
+        scale = max(output_size[0] / source_size[0], output_size[1] / source_size[1])
+    translation = ((np.asarray(output_size) - 1) - scale * (np.asarray(source_size) - 1)) / 2
+    return np.column_stack((np.eye(2) * scale, translation))
+
+
 def _eye_transform(eyes, target_distance, target_midpoint):
     """Similarity transform from two ordered eye centers, without face warping."""
     delta = eyes[1] - eyes[0]
@@ -427,6 +499,9 @@ def _warp(image, matrix, size, fill):
 
 def _quality_flags(mask, points, aligned, aligned_mask, native_distance, sampling_distance, matrix, *, check_foreground=True):
     flags = []
+    # A basic center crop has no face measurements from which to infer face QC.
+    if points is None:
+        return flags
     if native_distance < sampling_distance - 0.5:
         flags.append("insufficient_native_resolution")
     if check_foreground:

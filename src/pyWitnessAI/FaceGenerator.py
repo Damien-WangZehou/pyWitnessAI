@@ -6,9 +6,11 @@ path. Recorded attributes are requested conditions, not verified image labels.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
+import json
 import math
 from pathlib import Path
 import random
@@ -20,9 +22,13 @@ from .Description import (
     DescriptionParser, ParsedDescription,
     SchemaDescriptionParser, create_description_parser,
 )
-from .FaceAttributeSchema import DEFAULT_FACE_ATTRIBUTE_SCHEMA, FaceAttributeSchema, FaceDescriptionSchema
+from .FaceAttributeSchema import (
+    DEFAULT_FACE_ATTRIBUTE_SCHEMA, FaceAttributeSchema, FaceDescriptionSchema,
+    _PORTRAIT_INSTRUCTIONS,
+)
 from .GeneratedFaceDataset import GeneratedFaceDataset
 from .face_generation_backend import ImageGenerationBackend, ImageGenerationRequest, create_image_generation_backend
+from .prompt_processing import PromptProcessor, PromptProcessingRequest, PromptProcessingResult
 
 __all__ = ["FaceGenerator", "GeneratedFace"]
 
@@ -41,14 +47,17 @@ class GeneratedFace:
     prompt_hash: str = ""
     description: str = ""
     attributes: dict[str, str] = field(default_factory=dict)
+    filler_profile: str = ""
+    base_prompt: str = ""
+    prompt_processing: PromptProcessingResult | None = None
 
 
 class FaceGenerator:
     """Generate n portraits with a shared style and interchangeable backend.
 
-    Construction and generation_prompts() never contact a provider. Call
-    generate() (or the configured instance) to create images. A new instance
-    owns a unique batch; repeating generate() reuses that batch's existing files.
+    Construction and generation_prompts() without process=True never contact a
+    provider. Optional conversation processing runs before image generation.
+    A new instance owns a unique batch; repeating generate() reuses its files.
     seed controls sampled descriptions, not the provider's image randomness.
     """
 
@@ -59,6 +68,7 @@ class FaceGenerator:
         n: int = 1,
         *,
         description: str | ParsedDescription | None = None,
+        filler_profiles: Sequence[str] | None = None,
         parser: str | DescriptionParser = "schema",
         reference_image: str | Path | None = None,
         similarity: float = 75.0,
@@ -67,14 +77,30 @@ class FaceGenerator:
         seed: int | None = None,
         model: str | None = None,
         size: str = "1024x1024",
-        quality: str = "medium",
+        quality: str = "high",
         output_format: str = "png",
+        conversation_model: str | None = None,
+        prompt_processor: PromptProcessor | None = None,
     ) -> None:
         if isinstance(n, bool) or not isinstance(n, int) or n < 1:
             raise ValueError("n must be a positive integer.")
         if description is not None and not isinstance(description, ParsedDescription):
             if not isinstance(description, str) or not description.strip():
                 raise ValueError("description must be a non-empty string, ParsedDescription, or None.")
+        self.filler_profiles: tuple[str, ...] = ()
+        if filler_profiles is not None:
+            if isinstance(filler_profiles, (str, bytes)) or not isinstance(filler_profiles, Sequence):
+                raise ValueError("filler_profiles must be a sequence of n distinct non-empty strings.")
+            if len(filler_profiles) != n:
+                raise ValueError("filler_profiles must contain exactly n profiles, one per generated portrait.")
+            if any(not isinstance(profile, str) or not profile.strip() for profile in filler_profiles):
+                raise ValueError("filler_profiles must contain distinct non-empty strings.")
+            profiles = tuple(profile.strip() for profile in filler_profiles)
+            if len({" ".join(profile.split()).casefold() for profile in profiles}) != n:
+                raise ValueError("filler_profiles must contain distinct non-empty strings.")
+            if description is None:
+                raise ValueError("filler_profiles requires an explicit eyewitness description.")
+            self.filler_profiles = profiles
         self.backend = create_image_generation_backend(generator_backend) if isinstance(generator_backend, str) else generator_backend
         if not isinstance(self.backend, ImageGenerationBackend):
             raise TypeError("generator_backend must be a registered name or ImageGenerationBackend instance.")
@@ -102,6 +128,17 @@ class FaceGenerator:
         self.size, self.quality, self.output_format = size, quality, output_format.lower()
         if self.output_format not in {"png", "jpeg", "webp"}:
             raise ValueError("output_format must be png, jpeg, or webp.")
+        if conversation_model is not None:
+            if prompt_processor is not None:
+                raise ValueError("Supply either conversation_model or prompt_processor, not both.")
+            if not isinstance(conversation_model, str) or not conversation_model.strip():
+                raise ValueError("conversation_model must be a non-empty model name or None.")
+            from .API.openai_prompt_processor import OpenAIPromptProcessor
+            prompt_processor = OpenAIPromptProcessor(model=conversation_model)
+        if prompt_processor is not None and not callable(getattr(prompt_processor, "process", None)):
+            raise TypeError("prompt_processor must implement process(request).")
+        self.prompt_processor = prompt_processor
+        self._processed_prompts: dict[int, tuple[PromptProcessingRequest, PromptProcessingResult]] = {}
         self.created_at_utc = datetime.now(timezone.utc).isoformat()
         self.batch_id = f"batch_{uuid4().hex}"
         self.results: list[GeneratedFace] = []
@@ -114,9 +151,18 @@ class FaceGenerator:
             return "description"
         return "random_description" if self.write_manifest else "random"
 
-    def generation_prompts(self) -> list[str]:
-        """Preview the exact prompts for this batch without creating files."""
-        return [prompt for prompt, _, _ in self._plan_faces()]
+    def generation_prompts(self, *, process: bool = False) -> list[str]:
+        """Preview local/cached prompts; process=True may call the text provider.
+
+        Explicit processing caches the final prompts for later generate() calls.
+        Neither variant creates image files or calls the image provider.
+        """
+        return [prompt for prompt, _, _ in self._prepared_plans(process=process)]
+
+    @property
+    def prompt_processing_results(self) -> list[PromptProcessingResult]:
+        """Successful conversation results, in portrait order, without API calls."""
+        return [self._processed_prompts[index][1] for index in sorted(self._processed_prompts)]
 
     def _plan_faces(self) -> list[tuple[str, str, dict[str, str]]]:
         rng = random.Random(self.seed)
@@ -125,32 +171,95 @@ class FaceGenerator:
             parsed = self.parsed_description
             if self.generation_mode == "random_description":
                 parsed = _sample_description(self.attribute_schema, rng)
-            if (self.description is not None or self.write_manifest and self.reference_image is None) and not parsed.model_text.strip():
+            needs_description = self.description is not None or self.write_manifest and self.reference_image is None
+            if self.prompt_processor is None and needs_description and not parsed.model_text.strip():
                 raise ValueError("Description parser produced empty model input; choose another parser or provide supported attributes.")
             attributes = parsed.schema_attributes
             prompt = self._portrait_prompt(parsed, attributes, index)
             plans.append((prompt, parsed.model_text, attributes))
         return plans
 
+    def _prepared_plans(self, *, process: bool) -> list[tuple[str, str, dict[str, str]]]:
+        plans = self._plan_faces()
+        if self.prompt_processor is None:
+            return plans
+        if process:
+            # Reject missing references and unsupported inputs before any paid call.
+            for index, (prompt, _, _) in enumerate(plans, 1):
+                self.backend.validate_request(self._request(index, prompt))
+        prepared = []
+        for index, (base_prompt, description, attributes) in enumerate(plans, 1):
+            processing_request = PromptProcessingRequest(
+                original_description=self.description if self.description is not None else description,
+                parsed_description=description,
+                attributes=dict(attributes),
+                base_prompt=base_prompt,
+                portrait_instructions=_PORTRAIT_INSTRUCTIONS,
+                filler_profile=self.filler_profiles[index - 1] if self.filler_profiles else "",
+                reference_image=self.reference_image,
+                similarity=self.similarity if self.reference_image is not None and self.description is None else None,
+                index=index, total=self.n,
+                attributes_authoritative=self.parser_name == "preparsed" or self.generation_mode == "random_description",
+            )
+            cached = self._processed_prompts.get(index)
+            if cached is not None and cached[0] != processing_request:
+                raise ValueError("Generation conditions changed after prompt processing; create a new FaceGenerator.")
+            if cached is None and process:
+                result = self.prompt_processor.process(processing_request)
+                if not isinstance(result, PromptProcessingResult):
+                    raise TypeError("prompt_processor.process() must return PromptProcessingResult.")
+                # Keep experiment-wide composition instructions even if a rewrite omits them.
+                prompt = result.prompt.strip()
+                if _PORTRAIT_INSTRUCTIONS not in prompt:
+                    prompt += "\n\n" + _PORTRAIT_INSTRUCTIONS
+                result = replace(result, prompt=prompt)
+                cached = (processing_request, result)
+                self._processed_prompts[index] = cached
+            prepared.append((cached[1].prompt if cached is not None else base_prompt, description, attributes))
+        return prepared
+
     def _portrait_prompt(self, parsed: ParsedDescription, attributes: dict[str, str], index: int) -> str:
         schema = FaceDescriptionSchema.from_attributes(parsed.original_text, attributes)
-        prompt = schema.to_generation_prompt(variation=f"distinct fictional identity {index} of {self.n}")
-        if parsed.model_text and parsed.model_text != "; ".join(attributes.values()):
-            prompt += f" Requested description: {parsed.model_text}."
+        description = "; ".join(filter(None, (
+            parsed.model_text,
+            *(value for value in attributes.values() if value not in parsed.model_text),
+        )))
+        profile = self.filler_profiles[index - 1] if self.filler_profiles else ""
+        if profile:
+            description += (
+                f"\n\nAdditional design requirements for this portrait: {profile}\n"
+                "Apply these requirements only to features not specified in the eyewitness description. "
+                "All features specified in the eyewitness description take priority"
+            )
+        subject = {"male": "man", "female": "woman", "non-binary": "person"}.get(
+            schema.gender, "man" if self.description is not None else "person",
+        )
+        if self.reference_image is not None:
+            prompt = f"Make a photo of a {subject} based on this image"
+            if description:
+                prompt += f", with the following features: {description}"
+            prompt = prompt.rstrip(". ") + ". " + _PORTRAIT_INSTRUCTIONS
+            if self.description is None:
+                prompt += (
+                    f" Requested resemblance: {self.similarity:g}/100,"
+                    " where 0 means a distinctly dissimilar face and 100 means the greatest resemblance."
+                    " This is generation guidance, not a measured similarity score."
+                )
+            return prompt
+        if profile:
+            return (
+                f"Make a photo of an under average-looking {subject}, "
+                f"matching the following description: {description}. "
+                + _PORTRAIT_INSTRUCTIONS
+            )
+        prompt = schema.to_generation_prompt(description=description)
         if self.generation_mode == "random":
             prompt += " Randomly choose this person's facial features; create a new, distinct identity."
-        if self.reference_image is not None:
-            prompt += (
-                f" Use the supplied face image as a reference. Requested resemblance: {self.similarity:g}/100,"
-                " where 0 means a distinctly dissimilar face and 100 means the greatest resemblance."
-                " This is generation guidance, not a measured similarity score."
-                " Keep the portrait style above. Explicit described attributes take priority if they conflict with the reference."
-            )
         return prompt
 
     def generate(self, *, dry_run: bool = False) -> list[GeneratedFace]:
         """Create this batch and record each successful image, if requested."""
-        plans = self._plan_faces()
+        plans = self._prepared_plans(process=not dry_run)
         requests = [self._request(index, prompt) for index, (prompt, _, _) in enumerate(plans, 1)]
         for request in requests:
             self.backend.validate_request(request)
@@ -162,9 +271,13 @@ class FaceGenerator:
         self.results = []
         for request, (_, description, attributes) in zip(requests, plans):
             self._generate_image(request)
+            processed = self._processed_prompts.get(request.index)
             result = GeneratedFace(
                 request.index, str(request.output_path), request.prompt, self.model, self.provider,
                 self._image_id(request.index), self.batch_id, _prompt_hash(request.prompt), description, attributes,
+                filler_profile=self.filler_profiles[request.index - 1] if self.filler_profiles else "",
+                base_prompt=processed[0].base_prompt if processed is not None else request.prompt,
+                prompt_processing=processed[1] if processed is not None else None,
             )
             self.results.append(result)
             if self.write_manifest:
@@ -207,6 +320,10 @@ class FaceGenerator:
 
     def _manifest_record(self, result: GeneratedFace) -> dict[str, object]:
         dataset = GeneratedFaceDataset(self.output_dir)
+        processing = result.prompt_processing
+        label_source = "requested" if result.attributes else "unspecified"
+        if result.attributes and processing is not None and self.parser_name != "preparsed" and self.generation_mode != "random_description":
+            label_source = "parsed_attribute_hints"
         schema = FaceDescriptionSchema.from_attributes(result.description, result.attributes)
         record = dataset.records_from_generated(
             [result], schema=schema, verbal_description=result.description,
@@ -216,13 +333,21 @@ class FaceGenerator:
             generation_mode=self.generation_mode,
             original_description=self.description or "",
             parser=self.parser_name,
-            attribute_label_source="requested" if result.attributes else "unspecified",
+            attribute_label_source=label_source,
             attributes_verified=False,
             attribute_schema_name=self.attribute_schema.name,
             attribute_schema_version=self.attribute_schema.version,
             reference_image_path=str(self.reference_image or ""),
             requested_similarity=self.similarity if self.reference_image is not None else "",
             description_seed=str(self.seed) if self.generation_mode == "random_description" else "",
+            filler_profile=result.filler_profile,
+            base_prompt=result.base_prompt,
+            prompt_processing_mode="conversation" if processing is not None else "direct",
+            prompt_processing_provider=processing.provider if processing is not None else "",
+            prompt_processing_model=processing.model if processing is not None else "",
+            prompt_processing_summary=processing.summary if processing is not None else "",
+            prompt_processing_constraints=json.dumps(processing.constraints if processing is not None else (), ensure_ascii=False),
+            prompt_processing_conflicts=json.dumps(processing.conflicts if processing is not None else (), ensure_ascii=False),
         )
         return record
 

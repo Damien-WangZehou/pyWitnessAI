@@ -25,7 +25,7 @@ def create_lineup(
     *, suspect=None, description=None, reference_image=None, filler_pool=None,
     target=None, size=6, rows=2, order="random", seed=None, similarity=75,
     generator_backend="openai", output_dir="./facesGenerated", parser="raw",
-    generation_options=None,
+    generation_options=None, filler_profiles=None,
 ) -> Lineup:
     """Build from an existing pool, or generate the required number of fillers.
 
@@ -33,12 +33,15 @@ def create_lineup(
     omit suspect or supply an explicitly innocent suspect with target='absent'.
     Description and reference may be combined. A supplied pool is used directly;
     use FillerSelector first if it needs description-based selection.
-    generation_options accepts model, size, quality and output_format.
+    generation_options accepts model, size, quality, output_format and
+    conversation_model for optional prompt processing.
+    filler_profiles supplies exactly size-1 supplemental descriptions with a
+    suspect, or size descriptions for an all-filler TA lineup.
     """
     builder = LineupBuilder(suspect, filler_pool, target=target, size=size,
                             rows=rows, order=order, seed=seed)
     if filler_pool is not None:
-        if description is not None or reference_image is not None:
+        if description is not None or reference_image is not None or filler_profiles is not None:
             raise ValueError("Use filler_pool or generation conditions, not both; select a pool before building.")
         return builder.build()
     if suspect is not None:
@@ -48,6 +51,7 @@ def create_lineup(
         n=size - int(suspect is not None), output_dir=output_dir,
         similarity=similarity, generator_backend=generator_backend,
         parser=parser, seed=seed, generation_options=generation_options,
+        filler_profiles=filler_profiles,
     )
     builder.filler_pool = [face.path for face in generator.generate()]
     return builder.build()
@@ -285,7 +289,7 @@ class LineupSession:
 
 def _generator(*, generation_options=None, **kwargs):
     options = dict(generation_options or {})
-    unexpected = options.keys() - {"model", "size", "quality", "output_format"}
+    unexpected = options.keys() - {"model", "size", "quality", "output_format", "conversation_model"}
     if unexpected:
         raise ValueError(f"Unsupported generation_options: {sorted(unexpected)}")
     json.dumps(options)  # Saved configuration must also work outside this process.
