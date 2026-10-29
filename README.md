@@ -98,14 +98,23 @@ To mix photographs from different datasets with generated portraits, use
 ```python
 from pyWitnessAI import FaceStandardizer
 
-catalog = FaceStandardizer(detail_eye_distance=48).run("./face_pool", "./standardized_v1")
+catalog = FaceStandardizer().run("./face_pool", "./standardized_v1")
 print(catalog.manifest[["image_id", "status", "quality_flags"]])
 ```
 
-The same call accepts `generator.to_manifest()`. It preserves originals and
-metadata, saves aligned portraits and masks, and separates outputs requiring
-review from `catalog.ready`. The 48-pixel eye distance is an example sampling
-ceiling; choose it from the native resolution and display needs of your pool.
+The basic call crops portraits around the image center to the output aspect
+ratio, then resizes uniformly while preserving their backgrounds. It does not
+rotate images or load face detection or segmentation. Use
+`FaceStandardizer(alignment="eyes")` for eye alignment; padding defaults to a
+solid color estimated from each source image's visible border. Supply
+`background=(224, 224, 224)` to choose a fixed RGB color instead. The same call accepts
+`generator.to_manifest()`. It preserves originals and metadata, saves standardized
+portraits and coverage masks, and separates outputs requiring review from
+`catalog.ready`. Pass `remove_background=True` to segment the foreground and
+replace the background. A supplied reviewed `mask` or manifest `mask_path` also
+applies background replacement to that image. The optional
+`detail_eye_distance=48` setting is an example sampling ceiling; choose it from
+the native resolution and display needs of your pool.
 
 For optional local AI restoration, pass
 `enhancer=CodeFormerEnhancer(fidelity=1.0, strength=0.5)` to `FaceStandardizer`.

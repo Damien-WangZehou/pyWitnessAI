@@ -9,8 +9,10 @@ from pathlib import Path
 from ..face_generation_backend import ImageGenerationBackend, ImageGenerationRequest
 
 
-DEFAULT_IMAGE_MODEL = "gpt-image-2"
+DEFAULT_IMAGE_MODEL = "gpt-image-2.5-sunburst"
 OPENAI_IMAGE_MODELS = (
+    "gpt-image-2.5-flare"
+    "gpt-image-2.5-sunburst"
     "gpt-image-2",
     "gpt-image-1.5",
     "gpt-image-1",
