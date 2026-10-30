@@ -7,12 +7,13 @@ import os
 from pathlib import Path
 
 from ..face_generation_backend import ImageGenerationBackend, ImageGenerationRequest
+from ..generation_runtime import current_runtime
 
 
 DEFAULT_IMAGE_MODEL = "gpt-image-2.5-sunburst"
 OPENAI_IMAGE_MODELS = (
-    "gpt-image-2.5-flare"
-    "gpt-image-2.5-sunburst"
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-sunburst",
     "gpt-image-2",
     "gpt-image-1.5",
     "gpt-image-1",
@@ -30,12 +31,16 @@ class OpenAIImageBackend(ImageGenerationBackend):
     known_models = OPENAI_IMAGE_MODELS
     supports_reference_image = True
 
-    def __init__(self, client=None) -> None:
+    def __init__(self, client=None, *, runtime=None) -> None:
         self.client = client
+        self.runtime = runtime
 
     def generate(self, request: ImageGenerationRequest) -> None:
         self.validate_request(request)
-        client = self.client or self._create_client()
+        runtime = self.runtime or current_runtime()
+        client = self.client
+        if client is None:
+            client = runtime.client("openai", self._create_client) if runtime else self._create_client()
         arguments = dict(
             model=request.model,
             prompt=request.prompt,
@@ -43,11 +48,15 @@ class OpenAIImageBackend(ImageGenerationBackend):
             quality=request.quality,
             output_format=request.output_format,
         )
-        if request.reference_image is None:
-            response = client.images.generate(**arguments)
-        else:
+        def invoke(timeout=None):
+            active = client.with_options(max_retries=0, timeout=timeout) if runtime else client
+            if request.reference_image is None:
+                return active.images.generate(**arguments)
+            # Each eligible retry needs a fresh stream, starting at byte zero.
             with Path(request.reference_image).open("rb") as reference_image:
-                response = client.images.edit(image=reference_image, **arguments)
+                return active.images.edit(image=reference_image, **arguments)
+
+        response = runtime.call("image", request.model, invoke) if runtime else invoke()
         images = getattr(response, "data", None) or []
         image_base64 = getattr(images[0], "b64_json", None) if images else None
         if not image_base64:

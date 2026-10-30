@@ -148,6 +148,9 @@ print(session.history, session.status)
 和密钥不存入 JSON。
 
 Python 实例本身为同步接口；同一会话的调用需要串行执行。HTTP 层已提供会话锁。
+HTTP 生成操作使用共享的调用控制层，可通过 `create_app(generation_runtime=...)`
+配置并发、请求频率和有限重试；私有调用统计保存在 `output_dir/private/operations/`。
+任务存储与实验服务的复用方式见 [生成运行控制](GenerationRuntime.md)。
 `seed` 记录展示随机性，但不保证提供商生成像素可复现，也不保证多轮会收敛。
 
 ## HTTP：实验平台和 UI 使用同一套端点

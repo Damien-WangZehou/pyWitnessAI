@@ -29,6 +29,7 @@ from .FaceAttributeSchema import (
 )
 from .GeneratedFaceDataset import GeneratedFaceDataset
 from .face_generation_backend import ImageGenerationBackend, ImageGenerationRequest, create_image_generation_backend
+from .generation_runtime import ordered_map
 from .prompt_processing import (
     PromptProcessor, PromptProcessingBatchResult, PromptProcessingRequest, PromptProcessingResult,
 )
@@ -84,9 +85,13 @@ class FaceGenerator:
         output_format: str = "png",
         conversation_model: str | None = None,
         prompt_processor: PromptProcessor | None = None,
+        max_workers: int = 1,
     ) -> None:
         if isinstance(n, bool) or not isinstance(n, int) or n < 1:
             raise ValueError("n must be a positive integer.")
+        if isinstance(max_workers, bool) or not isinstance(max_workers, int) or max_workers < 1:
+            raise ValueError("max_workers must be a positive integer.")
+        self.max_workers = max_workers
         if description is not None and not isinstance(description, ParsedDescription):
             if not isinstance(description, str) or not description.strip():
                 raise ValueError("description must be a non-empty string, ParsedDescription, or None.")
@@ -317,8 +322,22 @@ class FaceGenerator:
             return []
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.results = []
-        for request, (_, description, attributes) in zip(requests, plans):
-            self._generate_image(request)
+        outcomes = None
+        if self.max_workers > 1:
+            def generate_one(request):
+                try:
+                    self._generate_image(request)
+                except Exception as exc:
+                    return exc
+                return None
+            outcomes = ordered_map(generate_one, requests, max_workers=self.max_workers)
+        errors = []
+        for offset, (request, (_, description, attributes)) in enumerate(zip(requests, plans)):
+            if outcomes is None:
+                self._generate_image(request)
+            elif outcomes[offset] is not None:
+                errors.append(outcomes[offset])
+                continue
             processed = self._processed_prompts.get(request.index)
             result = GeneratedFace(
                 request.index, str(request.output_path), request.prompt, self.model, self.provider,
@@ -330,6 +349,10 @@ class FaceGenerator:
             self.results.append(result)
             if self.write_manifest:
                 GeneratedFaceDataset(self.output_dir).add_records([self._manifest_record(result)])
+        if errors:
+            # In-flight work may succeed after a peer fails. Commit all successes
+            # in portrait order on this thread; retry reuses those exact files.
+            raise errors[0]
         return self.results
 
     def __call__(self, *, dry_run: bool = False) -> list[GeneratedFace]:

@@ -1,5 +1,6 @@
 """Study contracts verified with fake providers; never calls a paid image API."""
 import importlib.util
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -226,3 +227,46 @@ def test_http_contract_cors_and_private_media(tmp_path):
         bad = request().model_dump()
         bad["target_lineup"] = "absent"
         assert client.post("/v1/lineups", json=bad).status_code == 422
+
+
+def test_app_construction_does_not_open_database_and_lifespan_can_restart(tmp_path):
+    config = settings(tmp_path)
+    calls = []
+    def pipeline(req, *_):
+        calls.append(True)
+        return ready_result(req)
+    app = service.create_app(config, pipeline)
+    assert not config.storage_dir.exists()
+    with TestClient(app) as client:
+        job = client.post("/v1/lineups", json=request().model_dump()).json()
+        finished = wait_done(app.state.jobs, job["lineup_id"])
+        assert finished["status"] == "ready"
+        assert finished["timing"]["run_seconds"] >= 0
+    with TestClient(app) as client:
+        assert client.post("/v1/lineups", json=request().model_dump()).json()["lineup_id"] == job["lineup_id"]
+        assert calls == [True]
+        metrics = config.storage_dir / "private" / job["lineup_id"] / "runtime.json"
+        assert json.loads(metrics.read_text())["elapsed_seconds"] >= 0
+        assert client.get(f"/private/{job['lineup_id']}/runtime.json").status_code == 404
+
+
+def test_expired_queued_job_never_calls_pipeline(tmp_path):
+    config = settings(tmp_path)
+    manager = service.JobManager(config, lambda *_: pytest.fail("Expired task must not call a provider"))
+    payload = request().model_dump()
+    job, response, _ = manager.store.reserve(payload, request().participant_id, lambda j: {"lineup_id": j}, 2)
+    response["created_at"] = "2000-01-01T00:00:00+00:00"
+    with manager.store.connection() as con:
+        con.execute("UPDATE jobs SET response_json=? WHERE lineup_id=?", (json.dumps(response), job))
+    try:
+        manager.recover()
+        assert wait_done(manager, job)["status"] == "error"
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize("changes", [{"images_per_job": 0}, {"image_requests_per_minute": float("nan")},
+                                    {"provider_max_retries": -1}, {"generation_timeout_seconds": 0}])
+def test_invalid_runtime_settings_fail_before_startup(tmp_path, changes):
+    with pytest.raises(ValueError):
+        replace(settings(tmp_path), **changes)
