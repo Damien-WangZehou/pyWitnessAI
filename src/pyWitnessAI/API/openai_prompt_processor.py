@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 
 from ..prompt_processing import PromptProcessingBatchResult, PromptProcessingRequest, PromptProcessingResult
+from ..generation_runtime import current_runtime
 
 DEFAULT_CONVERSATION_MODEL = "gpt-5-mini"
 
@@ -202,11 +203,12 @@ class OpenAIPromptProcessor:
 
     provider = "openai"
 
-    def __init__(self, model: str = DEFAULT_CONVERSATION_MODEL, client=None) -> None:
+    def __init__(self, model: str = DEFAULT_CONVERSATION_MODEL, client=None, *, runtime=None) -> None:
         if not isinstance(model, str) or not model.strip():
             raise ValueError("conversation model must be a non-empty string.")
         self.model = model.strip()
         self.client = client
+        self.runtime = runtime
 
     def process(self, request: PromptProcessingRequest) -> PromptProcessingResult:
         """Understand the source request and return a validated complete prompt."""
@@ -273,15 +275,14 @@ class OpenAIPromptProcessor:
             raise RuntimeError(f"OpenAI prompt processing returned invalid batch result values: {exc}") from exc
 
     def _respond(self, content: list[dict], instructions: str, schema: dict, name: str):
-        if self.client is None:
-            self.client = self._create_client()
-        create = getattr(getattr(self.client, "responses", None), "create", None)
-        if not callable(create):
-            raise RuntimeError(
-                "OpenAI prompt processing requires a client with Responses API support. "
-                "Upgrade the OpenAI SDK with: python -m pip install --upgrade openai"
-            )
-        return create(
+        runtime = self.runtime or current_runtime()
+        client = self.client
+        if client is None:
+            if runtime:
+                client = runtime.client("openai", self._create_client)
+            else:
+                self.client = client = self._create_client()
+        arguments = dict(
             model=self.model,
             instructions=instructions,
             input=[{"role": "user", "content": content}],
@@ -293,6 +294,16 @@ class OpenAIPromptProcessor:
             }},
             store=False,
         )
+        def invoke(timeout=None):
+            active = client.with_options(max_retries=0, timeout=timeout) if runtime else client
+            create = getattr(getattr(active, "responses", None), "create", None)
+            if not callable(create):
+                raise RuntimeError(
+                    "OpenAI prompt processing requires a client with Responses API support. "
+                    "Upgrade the OpenAI SDK with: python -m pip install --upgrade openai"
+                )
+            return create(**arguments)
+        return runtime.call("text", self.model, invoke) if runtime else invoke()
 
     def _parse_response(self, response) -> PromptProcessingResult:
         payload = self._response_payload(response, _RESULT_SCHEMA["required"])

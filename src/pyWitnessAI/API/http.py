@@ -9,6 +9,7 @@ automatically. Feedback retries use the submitted round_number and choice.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import json
 import logging
 from pathlib import Path
@@ -30,6 +31,7 @@ except ImportError as exc:  # pragma: no cover - optional installation boundary
 
 from ..ImageCatalog import image_paths
 from ..LineupSession import LineupSession, create_lineup
+from ..generation_runtime import GenerationRuntime
 
 
 class GenerationOptions(BaseModel):
@@ -75,19 +77,36 @@ class FeedbackRequest(BaseModel):
     confirmed: bool = Field(strict=True)
 
 
-def create_app(*, output_dir, image_root, generator_backend="openai", allowed_origins=()) -> FastAPI:
+def create_app(*, output_dir, image_root, generator_backend="openai", allowed_origins=(), generation_runtime=None) -> FastAPI:
     """Create a local adapter without loading an index or model.
 
     All operations on one session share a lock. Multiple Uvicorn workers or
     separate processes must not write to the same output_dir concurrently.
     allowed_origins explicitly enables browser origins for UI integrations;
     the default permits no cross-origin browser requests.
+    generation_runtime shares provider concurrency/rate policies across all
+    requests. An injected runtime remains owned by the caller.
     """
     destination, inputs = Path(output_dir).resolve(), Path(image_root).resolve()
     if not inputs.is_dir():
         raise ValueError("image_root must be an existing directory.")
     destination.mkdir(parents=True, exist_ok=True)
-    app = FastAPI(title="pyWitnessAI lineup workflows", version="1.0.0")
+    runtime = generation_runtime if generation_runtime is not None else GenerationRuntime()
+
+    @asynccontextmanager
+    async def lifespan(application):
+        nonlocal runtime
+        if generation_runtime is None:
+            runtime = GenerationRuntime()
+            application.state.generation_runtime = runtime
+        try:
+            yield
+        finally:
+            if generation_runtime is None:
+                runtime.close()
+
+    app = FastAPI(title="pyWitnessAI lineup workflows", version="1.0.0", lifespan=lifespan)
+    app.state.generation_runtime = runtime
     app.add_middleware(
         CORSMiddleware, allow_origins=list(allowed_origins),
         allow_methods=["GET", "POST", "OPTIONS"],
@@ -95,6 +114,11 @@ def create_app(*, output_dir, image_root, generator_backend="openai", allowed_or
     )
     sessions, locks = {}, {}
     registry_lock = Lock()
+
+    def workflow(function, *args, **kwargs):
+        metrics = destination / "private" / "operations" / f"{uuid4()}.json"
+        with runtime.scope(metrics):
+            return _invoke(function, *args, **kwargs)
 
     def resource_directory(kind: str, resource_id: UUID) -> Path:
         directory = (destination / kind / str(resource_id)).resolve()
@@ -124,7 +148,7 @@ def create_app(*, output_dir, image_root, generator_backend="openai", allowed_or
         options["filler_pool"] = _input_pool(request.filler_pool, inputs)
         lineup_id = uuid4()
         directory = resource_directory("lineups", lineup_id)
-        lineup = _invoke(
+        lineup = workflow(
             create_lineup, **options, generator_backend=generator_backend,
             output_dir=directory / "generated",
         )
@@ -158,7 +182,7 @@ def create_app(*, output_dir, image_root, generator_backend="openai", allowed_or
                 LineupSession, **options, generator_backend=generator_backend,
                 output_dir=resource_directory("sessions", session_id),
             )
-            _invoke(session.start)
+            workflow(session.start)
             sessions[session_id] = session
             return _session_presentation(session_id, session)
 
@@ -171,7 +195,7 @@ def create_app(*, output_dir, image_root, generator_backend="openai", allowed_or
     def feedback(session_id: UUID, request: FeedbackRequest):
         with session_lock(session_id):
             session = load_session(session_id)
-            _invoke(session.respond, **request.model_dump(), invalid_status=409)
+            workflow(session.respond, **request.model_dump(), invalid_status=409)
             return _session_presentation(session_id, session)
 
     @app.post("/v1/sessions/{session_id}/stop")

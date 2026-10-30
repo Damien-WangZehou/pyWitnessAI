@@ -6,17 +6,14 @@ No API request is made by importing this module or by GET /health.
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
-import json
+import math
 import os
 from pathlib import Path
 import random
-import sqlite3
-import threading
 from typing import Callable, Literal
 from uuid import uuid4
 
@@ -24,6 +21,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from pyWitnessAI.job_runtime import ConflictError, DurableJobManager, QueueFullError
+from pyWitnessAI.generation_runtime import CallPolicy, GenerationRuntime, current_runtime, ordered_map, write_json_atomic
 
 STUDY_VERSION = "ai_generated_lineup_2x2_v1"
 HERE = Path(__file__).resolve().parent
@@ -53,8 +53,31 @@ class Settings:
     suspect_path: Path
     image_model: str | None = None
     max_concurrent_jobs: int = 2
-    max_pending_jobs: int = 40
+    max_pending_jobs: int = 2
     allowed_origins: tuple[str, ...] = ()
+    images_per_job: int = 2
+    max_concurrent_images: int = 4
+    image_requests_per_minute: float = 14.0
+    provider_max_retries: int = 2
+    generation_timeout_seconds: float = 300.0
+
+    def __post_init__(self):
+        for name in ("max_concurrent_jobs", "max_pending_jobs", "images_per_job", "max_concurrent_images"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer.")
+        if not math.isfinite(self.generation_timeout_seconds) or self.generation_timeout_seconds <= 0:
+            raise ValueError("generation_timeout_seconds must be finite and positive.")
+        CallPolicy(max_concurrent=self.max_concurrent_images, requests_per_minute=self.image_requests_per_minute,
+                   max_retries=self.provider_max_retries)
+
+    def create_runtime(self):
+        return GenerationRuntime(
+            image_policy=CallPolicy(max_concurrent=self.max_concurrent_images,
+                                    requests_per_minute=self.image_requests_per_minute,
+                                    max_retries=self.provider_max_retries),
+            text_policy=CallPolicy(max_concurrent=self.max_concurrent_jobs, max_retries=self.provider_max_retries),
+        )
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -63,9 +86,14 @@ class Settings:
             reference_dir=Path(os.getenv("REFERENCE_DIR", str(ROOT / "data" / "ReferenceFaces_CFD_WhiteMale"))).resolve(),
             suspect_path=Path(os.getenv("SUSPECT_PATH", str(HERE / "perp_refer_to_AI_generated_image.png"))).resolve(),
             image_model=os.getenv("IMAGE_MODEL") or None,
-            max_concurrent_jobs=max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "2"))),
-            max_pending_jobs=max(1, int(os.getenv("MAX_PENDING_JOBS", "40"))),
+            max_concurrent_jobs=int(os.getenv("MAX_CONCURRENT_JOBS", "2")),
+            max_pending_jobs=int(os.getenv("MAX_PENDING_JOBS", os.getenv("MAX_CONCURRENT_JOBS", "2"))),
             allowed_origins=tuple(v.strip() for v in os.getenv("ALLOWED_ORIGINS", "").split(",") if v.strip()),
+            images_per_job=int(os.getenv("IMAGES_PER_JOB", "2")),
+            max_concurrent_images=int(os.getenv("MAX_CONCURRENT_IMAGES", "4")),
+            image_requests_per_minute=float(os.getenv("IMAGE_REQUESTS_PER_MINUTE", "14")),
+            provider_max_retries=int(os.getenv("PROVIDER_MAX_RETRIES", "2")),
+            generation_timeout_seconds=float(os.getenv("GENERATION_TIMEOUT_SECONDS", "300")),
         )
 
 
@@ -73,114 +101,49 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-class ConflictError(ValueError):
-    pass
-
-
-class QueueFullError(RuntimeError):
-    pass
-
-
-class JobManager:
-    """Durable one-job-per-participant store, with a bounded generation executor."""
+class JobManager(DurableJobManager):
+    """Study rules over the shared durable job and provider-call runtimes."""
 
     def __init__(self, settings: Settings, pipeline: Callable | None = None):
         self.settings = settings
-        self.pipeline = pipeline or generate_lineup
-        self._lock = threading.RLock()
-        self._executor = ThreadPoolExecutor(max_workers=settings.max_concurrent_jobs, thread_name_prefix="lineup")
-        settings.storage_dir.mkdir(parents=True, exist_ok=True)
-        (settings.storage_dir / "media").mkdir(exist_ok=True)
+        self.study_pipeline = pipeline or generate_lineup
+        self.runtime = settings.create_runtime()
+        (settings.storage_dir / "media").mkdir(parents=True, exist_ok=True)
         (settings.storage_dir / "private").mkdir(exist_ok=True)
-        self.database = settings.storage_dir / "jobs.sqlite3"
-        with self._connection() as con:
-            con.execute("""CREATE TABLE IF NOT EXISTS jobs (
-                lineup_id TEXT PRIMARY KEY, participant_hash TEXT UNIQUE NOT NULL,
-                request_hash TEXT NOT NULL, request_json TEXT NOT NULL,
-                response_json TEXT NOT NULL, status TEXT NOT NULL
-            )""")
-
-    def _connection(self):
-        return sqlite3.connect(self.database, timeout=30)
-
-    def recover(self):
-        """Resume unstarted work; interrupted paid work requires researcher review."""
-        with self._lock, self._connection() as con:
-            rows = con.execute("SELECT lineup_id,response_json,status FROM jobs WHERE status IN ('queued','generating')").fetchall()
-            for lineup_id, raw, state in rows:
-                if state == "generating":
-                    response = json.loads(raw)
-                    response.update(status="error", error="Generation was interrupted. The researcher must review this attempt; it will not be regenerated automatically.", error_code="generation_interrupted", updated_at=_now())
-                    con.execute("UPDATE jobs SET status='error',response_json=? WHERE lineup_id=?", (_json(response), lineup_id))
-        for lineup_id, _, state in rows:
-            if state == "queued":
-                self._executor.submit(self._run, lineup_id)
+        super().__init__(settings.storage_dir / "jobs.sqlite3", self._generate,
+                         max_workers=settings.max_concurrent_jobs, max_pending=settings.max_pending_jobs,
+                         on_error=self._save_error)
 
     def submit(self, request: LineupRequest) -> dict:
-        payload = request.model_dump()
-        participant_hash = _digest(request.participant_id)
-        request_json = _json(payload)
-        request_hash = _digest(request_json)
-        with self._lock, self._connection() as con:
-            con.execute("BEGIN IMMEDIATE")
-            prior = con.execute("SELECT request_hash,response_json FROM jobs WHERE participant_hash=?", (participant_hash,)).fetchone()
-            if prior:
-                if prior[0] != request_hash:
-                    raise ConflictError("This participant already has a lineup with different description or condition. A retry cannot change it.")
-                return json.loads(prior[1])
-            pending = con.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','generating')").fetchone()[0]
-            if pending >= self.settings.max_pending_jobs:
-                raise QueueFullError("The generation queue is full. Retry later with the same participant ID.")
-            lineup_id = uuid4().hex
-            response = {
-                "status": "queued", "lineup_id": lineup_id,
-                "poll_url": f"/v1/lineups/{lineup_id}",
-                "condition": request.condition, "target_lineup": request.target_lineup,
-                "study_version": STUDY_VERSION, "created_at": _now(), "updated_at": _now(),
-            }
-            con.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)", (lineup_id, participant_hash, request_hash, request_json, _json(response), "queued"))
-        self._executor.submit(self._run, lineup_id)
-        return response
+        return super().submit(request.model_dump(), key=request.participant_id, response_factory=lambda job_id: {
+            "lineup_id": job_id, "poll_url": f"/v1/lineups/{job_id}",
+            "condition": request.condition, "target_lineup": request.target_lineup, "study_version": STUDY_VERSION,
+        })
 
-    def get(self, lineup_id: str) -> dict | None:
-        with self._connection() as con:
-            row = con.execute("SELECT response_json FROM jobs WHERE lineup_id=?", (lineup_id,)).fetchone()
-        return json.loads(row[0]) if row else None
+    def _generate(self, payload, job_id):
+        request = LineupRequest.model_validate(payload)
+        created = datetime.fromisoformat(self.get(job_id)["created_at"])
+        remaining = self.settings.generation_timeout_seconds - (datetime.now(timezone.utc) - created).total_seconds()
+        if remaining <= 0:
+            raise TimeoutError("The generation deadline expired in the queue.")
+        metrics = self.settings.storage_dir / "private" / job_id / "runtime.json"
+        with self.runtime.scope(metrics, timeout_seconds=remaining):
+            result = self.study_pipeline(request, self.settings, job_id)
+            _validate_lineup({**payload, **result})
+            return result
 
-    def _run(self, lineup_id: str):
-        with self._lock, self._connection() as con:
-            con.execute("BEGIN IMMEDIATE")
-            row = con.execute("SELECT request_json,response_json,status FROM jobs WHERE lineup_id=?", (lineup_id,)).fetchone()
-            if not row or row[2] != "queued":
-                return
-            request = LineupRequest.model_validate_json(row[0])
-            response = json.loads(row[1])
-            response.update(status="generating", updated_at=_now())
-            con.execute("UPDATE jobs SET status='generating',response_json=? WHERE lineup_id=?", (_json(response), lineup_id))
-        try:
-            result = self.pipeline(request, self.settings, lineup_id)
-            response.update(result, status="ready", updated_at=_now())
-            _validate_lineup(response)
-        except Exception as exc:
-            # Exception text can contain provider/request details. Store privately only.
-            error_path = self.settings.storage_dir / "private" / lineup_id
-            error_path.mkdir(parents=True, exist_ok=True)
-            (error_path / "error.txt").write_text(f"{type(exc).__name__}: {exc}", encoding="utf-8")
-            response = {k: v for k, v in response.items() if k not in ("items", "metadata", "suspect_position")}
-            response.update(status="error", error="The lineup could not be generated. This attempt will not be regenerated automatically; please contact the researcher.", error_code="generation_failed", updated_at=_now())
-        with self._lock, self._connection() as con:
-            con.execute("UPDATE jobs SET status=?,response_json=? WHERE lineup_id=?", (response["status"], _json(response), lineup_id))
+    def _save_error(self, job_id, exc):
+        error_path = self.settings.storage_dir / "private" / job_id
+        error_path.mkdir(parents=True, exist_ok=True)
+        (error_path / "error.txt").write_text(f"{type(exc).__name__}: {exc}", encoding="utf-8")
 
     def close(self):
-        self._executor.shutdown(wait=True)
+        super().close()
+        self.runtime.close()
 
 
 def _validate_lineup(response: dict):
@@ -197,15 +160,25 @@ def _validate_lineup(response: dict):
 
 def generate_lineup(request: LineupRequest, settings: Settings, lineup_id: str, *, generator_factory=None, standardizer_factory=None) -> dict:
     """Generate fillers with prompt processing, then standardize all lineup members."""
+    options = dict(generator_factory=generator_factory, standardizer_factory=standardizer_factory)
+    if generator_factory is None and current_runtime() is None:
+        runtime = settings.create_runtime()
+        try:
+            with runtime.scope(settings.storage_dir / "private" / lineup_id / "runtime.json",
+                               timeout_seconds=settings.generation_timeout_seconds):
+                return _generate_lineup(request, settings, lineup_id, **options)
+        finally:
+            runtime.close()
+    return _generate_lineup(request, settings, lineup_id, **options)
+
+
+def _generate_lineup(request, settings, lineup_id, *, generator_factory, standardizer_factory):
     # Imports are deferred so schema checks, health checks and fake-provider tests
     # do not need or contact OpenAI and do not download any model.
     if generator_factory is None:
         from pyWitnessAI import FaceGenerator
         from pyWitnessAI.API.openai import OpenAIImageBackend
-        from openai import OpenAI
-        if not os.environ.get("OPENAI_API_KEY"):
-            raise EnvironmentError("OPENAI_API_KEY must be set in the server environment.")
-        backend = OpenAIImageBackend(client=OpenAI(max_retries=0, timeout=240.0))
+        backend = OpenAIImageBackend()
         generator_factory = lambda **kwargs: FaceGenerator(generator_backend=backend, **kwargs)
     if standardizer_factory is None:
         from pyWitnessAI import FaceStandardizer
@@ -233,10 +206,11 @@ def generate_lineup(request: LineupRequest, settings: Settings, lineup_id: str, 
     generators = []
     if references:
         for index, reference in enumerate(references, 1):
-            generators.append(generator_factory(reference_image=reference, n=1, output_dir=private / f"generated_{index}", **common))
+            generators.append(generator_factory(reference_image=reference, n=1, output_dir=private / f"generated_{index}", max_workers=1, **common))
     else:
-        generators.append(generator_factory(reference_image=None, n=count, output_dir=private / "generated", **common))
-    faces = [face for generator in generators for face in generator.generate()]
+        generators.append(generator_factory(reference_image=None, n=count, output_dir=private / "generated", max_workers=settings.images_per_job, **common))
+    batches = ordered_map(lambda generator: generator.generate(), generators, max_workers=settings.images_per_job)
+    faces = [face for batch in batches for face in batch]
     if len(faces) != count:
         raise ValueError("The provider did not produce the requested number of fillers.")
     members = [(Path(face.path), "filler") for face in faces]
@@ -266,25 +240,26 @@ def generate_lineup(request: LineupRequest, settings: Settings, lineup_id: str, 
     }
     result = {"items": items, "metadata": metadata, "suspect_position": next((v["position"] for v in items if v["role"] == "suspect"), None)}
     manifest = {"request": request.model_dump(), "result": result, "sources_in_display_order": [str(source) for source, _ in members], "generation_prompts": [face.prompt for face in faces], "standardization_measurements": standardization_measurements, "created_at": _now()}
-    (private / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(private / "manifest.json", manifest)
     return result
 
 
 def create_app(settings: Settings | None = None, pipeline: Callable | None = None) -> FastAPI:
     config = settings or Settings.from_env()
-    manager = JobManager(config, pipeline)
-
     @asynccontextmanager
     async def lifespan(application):
-        manager.recover()
-        yield
-        manager.close()
+        manager = JobManager(config, pipeline)
+        application.state.jobs = manager
+        try:
+            manager.recover()
+            yield
+        finally:
+            manager.close()
 
     application = FastAPI(title="AI-generated lineup study", lifespan=lifespan)
-    application.state.jobs = manager
     if config.allowed_origins:
         application.add_middleware(CORSMiddleware, allow_origins=list(config.allowed_origins), allow_credentials=False, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["Content-Type"])
-    application.mount("/media", StaticFiles(directory=config.storage_dir / "media"), name="media")
+    application.mount("/media", StaticFiles(directory=config.storage_dir / "media", check_dir=False), name="media")
 
     @application.get("/")
     def index():
@@ -299,7 +274,7 @@ def create_app(settings: Settings | None = None, pipeline: Callable | None = Non
     @application.post("/v1/lineups")
     def submit(request: LineupRequest):
         try:
-            return manager.submit(request)
+            return application.state.jobs.submit(request)
         except ConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
         except QueueFullError as exc:
@@ -307,7 +282,7 @@ def create_app(settings: Settings | None = None, pipeline: Callable | None = Non
 
     @application.get("/v1/lineups/{lineup_id}")
     def get(lineup_id: str):
-        result = manager.get(lineup_id)
+        result = application.state.jobs.get(lineup_id)
         if result is None:
             raise HTTPException(404, "Unknown lineup.")
         return result

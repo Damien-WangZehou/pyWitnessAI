@@ -111,12 +111,26 @@ Service environment variables:
 | `SUSPECT_PATH` | Override the default fixed-suspect image path |
 | `LINEUP_STORAGE_DIR` | Persistent storage directory; defaults to `runtime/` in this study directory |
 | `MAX_CONCURRENT_JOBS` | Maximum concurrent generation jobs; default `2` |
-| `MAX_PENDING_JOBS` | Maximum total queued and generating jobs; default `40` |
+| `MAX_PENDING_JOBS` | Maximum total queued and generating jobs; defaults to `MAX_CONCURRENT_JOBS` (`2`) |
+| `IMAGES_PER_JOB` | Parallel portrait workflows within each job; default `2` |
+| `MAX_CONCURRENT_IMAGES` | Shared in-flight image API limit; default `4` |
+| `IMAGE_REQUESTS_PER_MINUTE` | Shared, smoothly paced image request limit; default `14` |
+| `PROVIDER_MAX_RETRIES` | Additional attempts for explicit temporary rate-limit/overload rejections; default `2` |
+| `GENERATION_TIMEOUT_SECONDS` | Dispatch/network-timeout budget from submission, including queue time; default `300` |
 | `OPENAI_API_KEY` | Server-side API credential |
 | `IMAGE_MODEL` | Optional image-model override |
 | `ALLOWED_ORIGINS` | Comma-separated allowed survey origins |
 
 Tune the job limits for the expected participant volume, model limits, and measured generation time, and pilot the deployment before data collection. The current conversation model is configured in `lineup_service.py`, not through an environment variable.
+
+Task persistence and execution now use the core `job_runtime` module; both HTTP
+adapters use `generation_runtime` for provider-call control. Existing SQLite job
+records remain readable. New jobs record queue/run/total durations, and private
+`runtime/private/<lineup-id>/runtime.json` files record individual calls and
+returned token usage. App construction/import does not open the job database.
+The five-minute budget cannot cancel an already-accepted provider request and
+does not measure browser display time. TPM/TPD quotas are not enforced by the
+request pacer. See [shared runtime configuration](../../docs/GenerationRuntime.md).
 
 `runtime/private/` stores raw generated images, prompts, descriptions, and research records; `runtime/jobs.sqlite3` stores jobs. Only `runtime/media/` serves standardized images publicly. The runtime directory is excluded by this directory's `.gitignore`. Preserve the job database and media to reproduce the lineup each participant actually saw, including when moving or restarting the service.
 
