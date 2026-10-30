@@ -207,6 +207,92 @@ def test_eye_alignment_keeps_default_eye_distance_when_omitted_or_none():
     assert FaceStandardizer(alignment="eyes")._recipe()["eye_distance"] == 0.25
 
 
+@pytest.mark.parametrize("source_size", [(1024, 1024), (319, 257), (257, 319), (321, 199), (199, 321)])
+@pytest.mark.parametrize("output_size", [(256, 320), (257, 319), (319, 257)])
+def test_center_fill_canvas_removes_padding_without_stretching_or_rotation(source_size, output_size):
+    image = Image.new("RGB", source_size, (30, 80, 140))
+    points = np.array([[0.30, 0.40], [0.65, 0.45], [0.50, 0.55],
+                       [0.40, 0.65], [0.60, 0.65]]) * source_size
+    options = dict(size=output_size, eye_distance=0.20, background=(255, 0, 255))
+
+    padded = FaceStandardizer(**options).transform(image, landmarks=points)
+    filled = FaceStandardizer(fill_canvas=True, **options).transform(image, landmarks=points)
+    basic = FaceStandardizer(size=output_size).transform(image)
+
+    assert padded.mask.getextrema()[0] == 0
+    assert filled.mask.getextrema() == (255, 255)
+    assert filled.image.tobytes() == basic.image.tobytes()
+    assert filled.metadata["transform_matrix"] == basic.metadata["transform_matrix"]
+    assert filled.metadata["eye_distance_clamped"] is True
+    assert filled.metadata["output_eye_distance"] > 0.20 * output_size[0]
+    matrix = np.array(json.loads(filled.metadata["transform_matrix"]))
+    np.testing.assert_allclose(matrix[0, 0], matrix[1, 1])
+    np.testing.assert_allclose([matrix[0, 1], matrix[1, 0]], 0)
+
+
+@pytest.mark.parametrize("native_distance", [120, 163.84])
+def test_center_fill_canvas_keeps_eye_target_when_it_already_covers(native_distance):
+    image = Image.new("RGB", (1024, 1024), (30, 80, 140))
+    points = np.array([[512 - native_distance / 2, 400], [512 + native_distance / 2, 400],
+                       [512, 500], [470, 600], [554, 600]])
+    options = dict(eye_distance=0.20, background=(255, 0, 255))
+
+    unbounded = FaceStandardizer(**options).transform(image, landmarks=points)
+    filled = FaceStandardizer(fill_canvas=True, **options).transform(image, landmarks=points)
+
+    assert filled.image.tobytes() == unbounded.image.tobytes()
+    assert filled.mask.tobytes() == unbounded.mask.tobytes()
+    assert filled.mask.getextrema() == (255, 255)
+    assert filled.metadata["eye_distance_clamped"] is False
+    assert filled.metadata["output_eye_distance"] == pytest.approx(51.2)
+
+
+def test_center_fill_canvas_batch_records_option_and_actual_measurements(tmp_path):
+    source = save_portrait(tmp_path / "source.png")
+    processor = FaceStandardizer(size=(200, 240), eye_distance=0.20, fill_canvas=True,
+                                 detector=lambda image: POINTS.copy())
+    destination = tmp_path / "output"
+
+    result = processor.run([source], destination)
+
+    assert len(result.ready) == 1
+    row = result.ready.iloc[0]
+    assert row["fill_canvas"]
+    assert row["eye_distance_clamped"]
+    assert row["output_eye_distance"] == pytest.approx(70)
+    with Image.open(row["standardized_mask_path"]) as mask:
+        assert mask.getextrema() == (255, 255)
+    recipe = json.loads((destination / "standardization.json").read_text(encoding="utf-8"))
+    assert recipe["fill_canvas"] is True
+    assert recipe["eye_distance"] == 0.20
+
+
+def test_center_fill_canvas_without_eye_distance_still_needs_no_models(monkeypatch):
+    image, _ = portrait()
+    processor = FaceStandardizer(fill_canvas=True)
+
+    def fail(*args, **kwargs):
+        pytest.fail("Filling the canvas alone must not require a model.")
+
+    monkeypatch.setattr(processor, "_detect", fail)
+    result = processor.transform(image)
+
+    assert result.image.tobytes() == FaceStandardizer().transform(image).image.tobytes()
+    assert result.mask.getextrema() == (255, 255)
+    assert result.metadata["eye_distance_clamped"] is False
+
+
+@pytest.mark.parametrize("fill_canvas", [None, 0, 1, "true"])
+def test_invalid_fill_canvas_is_rejected(fill_canvas):
+    with pytest.raises(TypeError, match="fill_canvas"):
+        FaceStandardizer(fill_canvas=fill_canvas)
+
+
+def test_fill_canvas_rejects_eye_alignment():
+    with pytest.raises(ValueError, match="fill_canvas.*center"):
+        FaceStandardizer(alignment="eyes", fill_canvas=True)
+
+
 def test_center_eye_distance_batch_prepares_detection_and_uses_each_source_background(tmp_path, monkeypatch):
     colors = [(180, 100, 60), (30, 80, 160)]
     sources = [save_portrait(tmp_path / f"source-{index}.png", color)

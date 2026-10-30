@@ -25,7 +25,7 @@ from .model_files import file_sha256
 
 __all__ = ["FaceStandardizer", "StandardizedFace"]
 
-_VERSION = "portrait-v5"
+_VERSION = "portrait-v6"
 _FALLBACK_BACKGROUND = (224, 224, 224)
 _YUNET_URL = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 _YUNET_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
@@ -57,6 +57,8 @@ class FaceStandardizer:
     supplied segmenter. An explicitly supplied mask also enables masking.
     Basic center crops use no models. Supplying ``eye_distance`` in center mode
     sets the eye-based scale about the image center without rotating the image.
+    ``fill_canvas=True`` prevents added padding in center mode for opaque sources,
+    increasing the eye-based scale when needed to cover the output.
     ``alignment="eyes"`` enables eye alignment
     using local YuNet. ``background="auto"`` estimates a fill color per image.
     An optional enhancer(image, *, landmarks) returns same-size RGB pixels;
@@ -69,6 +71,7 @@ class FaceStandardizer:
         size: tuple[int, int] = (256, 320),
         alignment: str = "center",
         eye_distance: float | None = None,
+        fill_canvas: bool = False,
         eye_height: float = 0.47,
         background: tuple[int, int, int] | str = "auto",
         remove_background: bool = False,
@@ -82,6 +85,10 @@ class FaceStandardizer:
             raise ValueError("size must contain two integer pixel dimensions >= 32.")
         if alignment not in ("center", "eyes"):
             raise ValueError('alignment must be "center" or "eyes".')
+        if not isinstance(fill_canvas, bool):
+            raise TypeError("fill_canvas must be a bool.")
+        if fill_canvas and alignment != "center":
+            raise ValueError('fill_canvas is only supported with alignment="center".')
         if eye_distance is not None and not 0 < eye_distance < 1:
             raise ValueError("eye_distance must be None or a fraction between 0 and 1.")
         if not 0 < eye_height < 1:
@@ -102,6 +109,7 @@ class FaceStandardizer:
         self.eye_distance = (float(eye_distance) if eye_distance is not None else
                              0.25 if alignment == "eyes" else None)
         self.alignment = alignment
+        self.fill_canvas = fill_canvas
         self.background = background if isinstance(background, str) else tuple(background)
         self.remove_background = remove_background
         self.detail_eye_distance = float(detail_eye_distance) if detail_eye_distance is not None else None
@@ -160,11 +168,16 @@ class FaceStandardizer:
             if points is not None and any(pixels[int(y), int(x)] < 128 for x, y in points):
                 raise ValueError("Foreground mask excludes core facial landmarks; review the segmentation.")
 
+        eye_distance_clamped = False
         if self.alignment == "eyes":
             matrix = _eye_transform(eyes, self.eye_distance * self.size[0],
                                     (self.size[0] / 2, self.eye_height * self.size[1]))
         else:
             requested_scale = self.eye_distance * self.size[0] / native_distance if self.eye_distance is not None else None
+            if self.fill_canvas and requested_scale is not None:
+                cover_scale = max(self.size[0] / rgb.width, self.size[1] / rgb.height)
+                eye_distance_clamped = requested_scale < cover_scale
+                requested_scale = max(requested_scale, cover_scale)
             matrix = _center_transform(rgb.size, self.size, scale=requested_scale)
         scale = float(np.linalg.norm(matrix[0, :2]))
         aligned_points = points @ matrix[:, :2].T + matrix[:, 2] if points is not None else None
@@ -192,6 +205,8 @@ class FaceStandardizer:
         metadata = {
             "input_width": rgb.width, "input_height": rgb.height,
             "alignment": self.alignment,
+            "fill_canvas": self.fill_canvas,
+            "eye_distance_clamped": eye_distance_clamped,
             "background_color": json.dumps(list(background)),
             "background_source": "auto" if automatic_background else "supplied",
             "native_eye_distance": native_distance,
@@ -380,6 +395,7 @@ class FaceStandardizer:
         recipe = dict(
             version=_VERSION, size=self.size, alignment=self.alignment,
             eye_distance=self.eye_distance, eye_height=self.eye_height,
+            fill_canvas=self.fill_canvas,
             background=self.background, remove_background=self.remove_background,
             detail_eye_distance=self.detail_eye_distance,
             color="sRGB; untagged RGB assumed sRGB; no exposure or skin-tone matching",

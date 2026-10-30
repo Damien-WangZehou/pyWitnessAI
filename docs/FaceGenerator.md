@@ -9,7 +9,9 @@ configured instance to create images.
 
 `n` is the total number of individual portraits. The generator makes `n`
 independent image requests, each asking for one portrait and writing one image file.
-The optional conversation layer adds one processing request per portrait.
+With an explicit eyewitness description, the optional OpenAI conversation layer
+coordinates all `n` supplementary profiles in one text request, including when
+`n=1`. Image requests remain independent.
 For a six-person lineup, generate five fillers for TP and add the suspect, or
 generate six fillers for an all-filler TA lineup. `create_lineup(size=6, ...)`
 calculates these counts from whether `suspect` is supplied.
@@ -80,9 +82,9 @@ sampling and ethnicity matching are experiment setup steps.
 
 ## Portrait prompts
 
-Description-only generation asks for one under average-looking man matching
-the description. Each request uses a singular portrait prompt. Description and
-reference generation uses this template:
+Local, unprocessed description-only prompts ask for one under average-looking
+man matching the description. Each request uses a singular portrait prompt.
+Description and reference generation uses this template:
 
 ```text
 Make a photo of a man based on this image, with the following features: {description} Make it an image portrait, only from shoulders above. Make the background gray. The people should be looking at the camera with frontal face. Do not emphasize or depict body actions, hand placement, or clothing interactions.
@@ -98,66 +100,105 @@ the neutral subject "person".
 
 ## Optional conversation layer
 
-Set `conversation_model` to enable an OpenAI Responses processing step before
-each image request. The processor interprets the request, extracts constraints,
-resolves conflicts according to the supplied priorities, and rewrites the image
-prompt. The image backend and its `model` parameter remain separately configured.
-Omitting both `conversation_model` and `prompt_processor` preserves direct mode.
+Set `conversation_model` to enable OpenAI Responses prompt processing before
+image generation. When an explicit eyewitness `description` is supplied, the
+default OpenAI processor plans one supplementary appearance profile for each
+of the `n` portraits in a single text request. It can consider the whole group
+when choosing features the witness left unspecified. This also applies to
+`n=1` and to a description accompanied by a reference image. The image backend
+and its `model` parameter remain separately configured. Omitting both
+`conversation_model` and `prompt_processor` preserves direct mode.
 
 ```python
-from pyWitnessAI import FaceGenerator
+from pyWitnessAI import FaceGenerator, RawDescriptionParser
 
 # Direct mode: local prompt construction followed by the image request.
 direct = FaceGenerator(description="a man with short hair and blue eyes")
 
-# Optional processing: one conversation request, then one image request per face.
+witness_description = (
+    "A man in his twenties, short hair, no beard, slim build, "
+    "with prominent eyebrows and eyes."
+)
+
+# One conversation request plans five profiles; five image requests follow.
 generator = FaceGenerator(
-    description="一名短发男子，鼻子很突出；眼睛可能是蓝色，也可能是灰色。",
+    description=witness_description,
+    parser=RawDescriptionParser(lowercase=False),
     conversation_model="gpt-5-mini",
-    n=2,
+    n=5,  # TP fillers; use n=6 for an all-filler TA lineup.
 )
 base_prompts = generator.generation_prompts()  # Local, unprocessed preview
-final_prompts = generator.generation_prompts(process=True)  # Network and cost
+final_prompts = generator.generation_prompts(process=True)  # One paid text call
 processing_results = generator.prompt_processing_results
+additional_features = [result.additional_description for result in processing_results]
 faces = generator.generate()  # Reuses the cached processed prompts
 ```
 
-Processing receives the original description, parser attribute hints, any filler
-profile, and any reference image. This preserves details or languages that the
-default English schema parser may omit. The request's `attributes` dictionary
-contains parser hints unless `attributes_authoritative=True` identifies explicit
-experimental controls. Conversation-model interpretations do not become
-canonical manifest attribute labels automatically.
+The processor receives the full original description, parser attribute hints,
+any manually supplied filler profiles, and any reference image. It returns
+individual additional descriptions rather than replacing the witness's wording
+with a shortened rewrite. `FaceGenerator` then constructs each final prompt
+locally: the full original verbal description, that portrait's additional
+features, and the mandatory portrait instructions, included once. Each prompt
+stands alone; processed batch prompts do not include a generic instruction to
+make the face different from unspecified "other portraits".
 
 Fixed portrait composition has the highest priority: one portrait from the
 shoulders above, a gray background, and a frontal face looking at the camera,
-without depicting body actions or clothing interactions. The generator ensures
-those instructions are included in the final prompt. Among appearance sources, the original
-witness description takes priority over the filler profile, followed by the
-reference image. Explicit attributes in a supplied `ParsedDescription` and
-randomly sampled conditions are authoritative experimental controls and take
-priority over conflicting raw wording. The full original description remains
-available to the processor. The processor is instructed to omit uncertain or mutually
-conflicting witness traits and record the conflict rather than invent a
-definite value. A model refusal, incomplete response, malformed result, or
-processing error stops the request before image generation; there is no silent
-fallback to direct mode.
+without depicting body actions or clothing interactions. Explicit experimental
+controls in a supplied `ParsedDescription` take priority over conflicting
+source wording. Otherwise, the original witness description takes priority
+over supplemental profiles, followed by the reference image; ordinary parser
+attributes are hints. Supplements must respect witness-described traits,
+negation, uncertainty, and unresolved conflicts. They must not turn an
+uncertain or contradictory observation into a definite trait. The original
+description remains in the final prompt, with higher-priority controls stated
+explicitly where applicable. Model-reported constraints and conflicts describe
+the requested design; they do not become canonical manifest attribute labels.
 
-`generation_prompts(process=True)` processes and caches each portrait's result
-without generating images. Later previews return the cached final prompt and
-later `generate()` calls reuse it. `generate(dry_run=True)` never contacts either
-provider or writes files: it prints base prompts unless processing results
-have already been cached. Create a new instance when changing descriptions,
-profiles, reference images, or processing settings.
+Iris colour is an exception to the diversity instructions. When it is genuinely
+unmentioned and not fixed by explicit experimental controls, the planner is
+instructed to specify brown irises for at least `n - 1` portraits and allow at
+most one portrait with non-brown irises across the entire set. All-brown is also
+valid: five fillers require at least four brown-eyed profiles, and six require
+at least five. A single portrait defaults to brown. Hazel counts as non-brown;
+different shades of brown are allowed. Descriptions of eye size, shape, or
+prominence do not specify iris colour. Explicit witness colours and experimental
+controls take priority, while uncertain, negated, or contradictory colour
+statements remain unresolved rather than receiving this default. Manual profiles
+and reference images cannot introduce extra non-brown exceptions to the default.
+This is a planning instruction; the local text validator does not verify the
+iris-colour allocation or the colours of generated images.
+
+The batch response must contain exactly `n` nonempty, distinct additional
+descriptions. Validation checks the count, empty values, and duplicate text
+after whitespace and case normalization; it does not verify semantic
+compatibility or meaningful differences between profiles. Planning different
+additions does not guarantee distinct generated
+identities, correct witness traits, or image diversity. Inspect the prompts and
+generated portraits for the intended experiment. A model refusal, incomplete
+response, malformed group, or processing error stops before image generation,
+without falling back to direct mode.
+
+`generation_prompts(process=True)` validates and caches the complete group
+atomically without generating images: an invalid group leaves no partial batch
+in the cache. Repeated previews, later `generate()` calls, and retries after an
+image-generation failure reuse that group's profiles and final prompts. A
+failed text-processing call can be retried, but has no valid group to reuse.
+`generate(dry_run=True)` never contacts either provider or writes files: it
+prints base prompts unless processing results have already been cached. Create
+a new instance when changing descriptions, profiles, reference images, or
+processing settings.
 
 `prompt_processing_results` returns available results in portrait order. Each
 `PromptProcessingResult` has `prompt`, `summary`, `constraints`, `conflicts`,
-`model`, and `provider`; constraints and conflicts are tuples of strings. These
-records make the prompt transformation inspectable. They are model-reported
-interpretations, not verification of the generated pixels. This layer uses a
-separate request for each portrait and does not maintain multi-turn chat
-history. It adds network latency and conversation-model cost to image
-generation, using the same `pyWitnessAI[generation]` extra and `OPENAI_API_KEY`.
+`model`, `provider`, `additional_description`, and `strategy`; constraints and
+conflicts are tuples of strings. `strategy="batch_profiles"` identifies the
+coordinated additions, and `strategy="rewrite"` identifies the existing complete
+prompt rewrite. These records make the requested transformation inspectable;
+they do not verify generated pixels. Processing does not maintain multi-turn
+chat history. It adds network latency and conversation-model cost, using the
+same `pyWitnessAI[generation]` extra and `OPENAI_API_KEY`.
 
 For an already configured OpenAI client, or another processor implementation,
 pass `prompt_processor` instead:
@@ -176,9 +217,20 @@ faces = generator.generate()
 
 Do not supply both `conversation_model` and `prompt_processor`. A custom
 processor implements `process(PromptProcessingRequest) -> PromptProcessingResult`;
-both contract types are exported from `pyWitnessAI`. The custom processor is
-responsible for its provider calls and structured response. The generator
-validates its result before dispatching the image request.
+these contract types are exported from `pyWitnessAI`. A processor that implements
+only `process()` keeps the existing separate rewrite call for each portrait.
+An optional `process_batch(requests) -> PromptProcessingBatchResult` supplies
+coordinated additional descriptions for explicit eyewitness descriptions;
+`OpenAIPromptProcessor` implements this method. `PromptProcessingBatchResult`
+contains `profiles` in portrait order, `summary`, `constraints`, `conflicts`,
+`model`, and `provider`, and is also exported from `pyWitnessAI`. The generator
+validates the entire result before dispatching any image request. Custom
+processors remain responsible for their provider calls and structured response.
+
+Reference-only generation and random generation, including sampled descriptions
+when no explicit `description` was supplied, retain the per-portrait rewrite
+path. In that path, the processor resolves conflicts in the complete prompt,
+and randomly sampled attributes remain authoritative experimental controls.
 
 ## Share a parser with selection
 
@@ -249,17 +301,21 @@ Random sampling uses explicit `sample_values`, not regular expressions or benchm
 
 Use `filler_profiles` to supply a different supplementary design for each
 generated filler. It must be a sequence of exactly `n` distinct, nonempty
-strings, and an explicit `description` is required. The default `None` keeps the
-existing prompts and generation behavior.
+strings, and an explicit `description` is required. The default `None` supplies
+no manual profiles; an enabled OpenAI processor can still plan batch profiles
+automatically as described above.
 
-Each profile appears in a separate `Additional design requirements` block.
+In local, unprocessed prompts, each manual profile appears in a separate
+`Additional design requirements` block.
 Witness-described traits take priority: researchers should supply only
 dimensions the witness did not describe. Direct mode expresses that priority
 in the prompt without automatically detecting conflicts. The optional
-conversation layer is instructed to resolve and report conflicts. When profiles are supplied, the description-only
-template omits its generic request for facial features and hair styles to
-differ from the other lineup members; the explicit profiles guide those
-differences instead.
+conversation layer receives the manual profiles and is instructed to keep
+compatible requirements while resolving and reporting conflicts. Manual
+profiles remain supported with coordinated batch additions. When manual
+profiles are supplied, the description-only template omits its generic request
+for facial features and hair styles to differ from the other lineup members;
+the explicit profiles guide those differences instead.
 
 Profiles are separate from the witness description and are not processed as
 witness traits by the description parser. `RawDescriptionParser(lowercase=False)`
@@ -332,21 +388,26 @@ With recording enabled, successful images are appended to `manifest.csv` in `out
 
 Records include image IDs and paths, batch information, prompts, model details, schema attributes, `generation_mode`, `reference_image_path`, and `requested_similarity`. Standard attributes use columns such as `eyes`; extensions use names such as `attribute__skin_marking`.
 
-The supplementary profile is recorded separately as `GeneratedFace.filler_profile`
-and the manifest's `filler_profile` column. `original_description` retains the
-original witness description; profiles do not populate witness attribute
-columns.
+The manually supplied supplementary profile is recorded separately as
+`GeneratedFace.filler_profile` and the manifest's `filler_profile` column.
+Automatically planned additions are recorded in the prompt-processing fields
+below. `original_description` retains the original witness description;
+supplementary profiles do not populate witness attribute columns.
 
 When processing is enabled, `prompt` records the actual final image prompt and
 `base_prompt` preserves its locally constructed input. Processing provenance
 uses `prompt_processing_provider`, `prompt_processing_model`,
-`prompt_processing_summary`, `prompt_processing_constraints`, and
-`prompt_processing_conflicts`. The constraints and conflicts columns contain
-JSON-encoded string lists. Canonical attribute columns continue to reflect the
-description parser or explicit sampling; model-extracted constraints are kept
-in the separate processing fields. Processed records from ordinary text use
-`attribute_label_source="parsed_attribute_hints"` because semantic conflict
-resolution may omit a parsed trait from the final prompt. Authoritative
+`prompt_processing_summary`, `prompt_processing_constraints`,
+`prompt_processing_conflicts`, `prompt_processing_additional_description`, and
+`prompt_processing_strategy`. The strategy is `"batch_profiles"` for coordinated
+additions and `"rewrite"` for the legacy complete-prompt path. The existing
+`prompt_processing_mode` remains `"conversation"` or `"direct"`. The constraints
+and conflicts columns contain JSON-encoded string lists. Canonical attribute
+columns continue to reflect the description parser or explicit sampling;
+model-reported constraints and additions stay in the separate processing
+fields. Processed records from ordinary text use
+`attribute_label_source="parsed_attribute_hints"`: these are local parser hints,
+not attributes verified by prompt processing. Authoritative
 pre-parsed or sampled attributes retain `"requested"`; records without
 attributes use `"unspecified"`. The processing
 result's `prompt` includes the enforced portrait instructions and matches the
@@ -418,11 +479,11 @@ Custom backends subclass `ImageGenerationBackend`, implement `generate(request)`
 
 | Module | Responsibility | Main dependencies |
 | --- | --- | --- |
-| `FaceGenerator.py` | Prompt planning, optional processing cache, image dispatch, results and manifest records | Description, FaceAttributeSchema, prompt processor, backend, GeneratedFaceDataset |
+| `FaceGenerator.py` | Prompt planning, deterministic batch-profile composition, optional processing cache, image dispatch, results and manifest records | Description, FaceAttributeSchema, prompt processor, backend, GeneratedFaceDataset |
 | `Description.py` | Reusable parsing strategies | FaceAttributeSchema and optional contrast rules |
 | `FaceAttributeSchema.py` | Canonical attributes, sampling values and portrait templates | Standard library |
 | `face_generation_backend.py` | Provider-independent request, base class, validation and registry | Standard library; loads the chosen adapter when requested |
-| `prompt_processing.py` | Provider-independent prompt processing request and result contracts | Standard library |
+| `prompt_processing.py` | Provider-independent per-portrait request/result and coordinated batch-profile contracts | Standard library |
 | `API/openai.py` | OpenAI image model defaults, lazy client calls, reference uploads and response decoding | Generic backend interface; OpenAI SDK when used |
-| `API/openai_prompt_processor.py` | OpenAI Responses prompt processing with structured results and reference input | Prompt processing interface; OpenAI SDK when used |
+| `API/openai_prompt_processor.py` | OpenAI Responses batch-profile planning and legacy rewrites with structured results and reference input | Prompt processing interface; OpenAI SDK when used |
 | `GeneratedFaceDataset.py` | Manifest storage, requested-attribute matching and dataset generation | FaceAttributeSchema, backend; FaceGenerator when generating |
