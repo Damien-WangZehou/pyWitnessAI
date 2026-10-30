@@ -83,15 +83,28 @@ class OfflineOpenAISDK:
     def create_response(self, **arguments):
         self.events.append("text")
         self.text_calls.append(arguments)
+        payload = {
+            "summary": "Retained eye colour and one-person composition.",
+            "constraints": ["blue eyes", "one person"],
+            "conflicts": [],
+        }
+        schema = arguments["text"]["format"]["schema"]
+        if "profiles" in schema["properties"]:
+            profiles = (
+                "An oval face with a narrow straight nose.",
+                "A square face with a broad rounded nose.",
+                "A round face with a short upturned nose.",
+                "An oblong face with a long convex nose.",
+                "A heart-shaped face with a pointed chin.",
+                "A diamond-shaped face with a broad flat chin.",
+            )
+            payload["profiles"] = profiles[:schema["properties"]["profiles"]["maxItems"]]
+        else:
+            payload["prompt"] = "Photograph one person with blue eyes."
         return SimpleNamespace(
             status="completed",
             model="text-test-snapshot",
-            output_text=json.dumps({
-                "prompt": "Photograph one person with blue eyes.",
-                "summary": "Retained eye colour and one-person composition.",
-                "constraints": ["blue eyes", "one person"],
-                "conflicts": [],
-            }),
+            output_text=json.dumps(payload),
         )
 
     def generate_image(self, **arguments):
@@ -446,8 +459,10 @@ def test_real_openai_adapters_form_text_then_image_pipeline_with_mock_sdk(
     assert text_call["model"] == "text-test"
     assert image_call["model"] == result.model == "image-test"
     assert image_call["prompt"] == result.prompt == result.prompt_processing.prompt
-    assert "Photograph one person with blue eyes." in result.prompt
-    assert _PORTRAIT_INSTRUCTIONS in result.prompt
+    assert "a man with blue eyes" in result.prompt
+    assert "An oval face with a narrow straight nose." in result.prompt
+    assert result.prompt.count(_PORTRAIT_INSTRUCTIONS) == 1
+    assert result.prompt_processing.strategy == "batch_profiles"
     assert result.prompt_processing.model == "text-test-snapshot"
     assert result.prompt_processing.constraints == ("blue eyes", "one person")
     assert result.prompt_processing.conflicts == ()
@@ -542,7 +557,7 @@ def test_lineup_session_preserves_conversation_model_when_saved_and_resumed(tmp_
 
     session.start()
     call_count = len(sdk.text_calls)
-    assert call_count == 2
+    assert call_count == 1
     resumed = LineupSession.load(session.output_dir, generator_backend=backend)
 
     assert resumed.generation_options == {"conversation_model": "text-test"}

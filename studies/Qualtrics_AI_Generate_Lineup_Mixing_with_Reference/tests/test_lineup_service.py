@@ -12,6 +12,8 @@ import pytest
 from PIL import Image
 from fastapi.testclient import TestClient
 
+from pyWitnessAI import FaceStandardizer
+
 MODULE_PATH = Path(__file__).resolve().parents[1] / "lineup_service.py"
 spec = importlib.util.spec_from_file_location("study_lineup_service", MODULE_PATH)
 service = importlib.util.module_from_spec(spec)
@@ -46,9 +48,36 @@ def fake_generator_factory(calls):
             for i in range(self.kwargs["n"]):
                 p = out / f"fake{i}.png"
                 Image.new("RGB", (1024, 1024), (30 + i, 100, 200)).save(p)
-                result.append(SimpleNamespace(path=p, prompt="raw prompt " + self.kwargs["description"]))
+                result.append(SimpleNamespace(path=p, prompt="fake processed prompt " + self.kwargs["description"]))
             return result
     return Generator
+
+
+def measured_standardizer_factory(calls, portraits):
+    def factory(**kwargs):
+        calls.append(kwargs)
+        detections = []
+
+        def detect(image):
+            # Alternate between exact eye scaling and the canvas-coverage limit.
+            fraction = 0.12 if len(detections) % 2 == 0 else 0.25
+            detections.append(image.size)
+            width, height = image.size
+            return [[width * (0.5 - fraction / 2), height * 0.4],
+                    [width * (0.5 + fraction / 2), height * 0.4],
+                    [width * 0.5, height * 0.5],
+                    [width * 0.45, height * 0.6],
+                    [width * 0.55, height * 0.6]]
+
+        processor = FaceStandardizer(detector=detect, **kwargs)
+
+        def transform(source):
+            portrait = processor.transform(source)
+            portraits.append(portrait)
+            return portrait
+
+        return SimpleNamespace(transform=transform)
+    return factory
 
 
 @pytest.mark.parametrize("condition", ["mixingFaces", "noMixing"])
@@ -56,13 +85,27 @@ def fake_generator_factory(calls):
 def test_four_conditions_and_reference_isolation(tmp_path, condition, target):
     config = settings(tmp_path)
     calls = []
-    result = service.generate_lineup(request(condition, target), config, "testlineup", generator_factory=fake_generator_factory(calls))
+    standardizer_calls, portraits = [], []
+    result = service.generate_lineup(
+        request(condition, target), config, "testlineup",
+        generator_factory=fake_generator_factory(calls),
+        standardizer_factory=measured_standardizer_factory(standardizer_calls, portraits),
+    )
     service._validate_lineup({**result, "target_lineup": target})
     count = 5 if target == "targetPresent" else 6
     assert sum(c["n"] for c in calls) == count
-    assert all(c["conversation_model"] is None and c["prompt_processor"] is None for c in calls)
     assert all(c["parser"].parse("MiXeD Case").model_text == "MiXeD Case" for c in calls)
     assert all(c["description"] == "A MAN with Short Hair." for c in calls)
+    assert all(c["size"] == "1024x1024" for c in calls)
+    expected_standardization = {"size": [256, 320], "alignment": "center", "eye_distance": 0.23, "fill_canvas": True, "background": "auto", "remove_background": False}
+    assert result["metadata"]["standardization"] == expected_standardization
+    assert standardizer_calls == [{**expected_standardization, "size": (256, 320)}]
+    assert len(portraits) == 6
+    assert all(portrait.mask.getextrema() == (255, 255) for portrait in portraits)
+    assert [portrait.metadata["eye_distance_clamped"] for portrait in portraits] == [False, True] * 3
+    # The requested distance is 256 * 0.23; canvas coverage raises it to 80
+    # for every second portrait rather than introducing padded borders.
+    assert [portrait.metadata["output_eye_distance"] for portrait in portraits] == pytest.approx([58.88, 80] * 3)
     if condition == "mixingFaces":
         assert len(calls) == count
         assert len({c["reference_image"] for c in calls}) == count
@@ -79,7 +122,15 @@ def test_four_conditions_and_reference_isolation(tmp_path, condition, target):
                 assert image.getpixel((128, 160)) == (255, 0, 0)
     manifest = json.loads((config.storage_dir / "private/testlineup/manifest.json").read_text())
     assert len(manifest["generation_prompts"]) == count
-    assert result["metadata"]["prompt_processing"] is False
+    assert manifest["standardization_measurements"] == [
+        {"position": item["position"], "image_id": item["image_id"],
+         "output_eye_distance": portrait.metadata["output_eye_distance"],
+         "eye_distance_clamped": portrait.metadata["eye_distance_clamped"]}
+        for item, portrait in zip(result["items"], portraits)
+    ]
+    assert result["metadata"]["prompt_processing"] is True
+    assert result["metadata"]["prompt_mode"] == "conversation"
+    assert manifest["result"]["metadata"] == result["metadata"]
 
 
 def ready_result(req):

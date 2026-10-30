@@ -37,6 +37,27 @@ the face; smaller values shrink it and may expose padding, filled using
 (or passing `None`) keeps the basic center crop and does not require face detection
 unless another option needs landmarks.
 
+To prioritize filling the output over the exact eye-distance target:
+
+```python
+standardizer = FaceStandardizer(
+    alignment="center", eye_distance=0.20, fill_canvas=True,
+)
+```
+
+In center mode, `fill_canvas=True` uses the larger of the requested eye-based
+scale and `max(output_width / input_width, output_height / input_height)`.
+This keeps opaque source images covering the output without adding padding,
+while preserving the image center, proportions, and original orientation. Some
+portraits will consequently have an eye separation larger than the requested
+fraction. Per-image `output_eye_distance` records the actual distance in pixels,
+and `eye_distance_clamped` records whether the cover scale increased it.
+Source transparency and removed backgrounds can still use the configured fill;
+this option only prevents padding outside the source rectangle. It is supported
+only with `alignment="center"`. Without `eye_distance`, it leaves the basic,
+model-free center crop unchanged. The default `fill_canvas=False` preserves the
+exact eye-distance target and allows padding when needed.
+
 To align portraits using their eyes, opt in explicitly:
 
 ```python
@@ -88,6 +109,7 @@ remain requested attributes; processing does not verify their accuracy.
 | `size` | `(256, 320)` | Output width and height in pixels |
 | `alignment` | `"center"` | Center crop and uniform resize; `"eyes"` enables eye alignment |
 | `eye_distance` | `None` (`0.25` in `"eyes"` mode) | Target eye separation as a fraction of output width; enables eye-based scaling without rotation in `"center"` mode |
+| `fill_canvas` | `False` | Center mode only: increase the eye-based scale if needed to fill the output with the source rectangle; actual eye distance may exceed the target |
 | `eye_height` | `0.47` | In eye alignment mode, eye midpoint height as a fraction of output height |
 | `background` | `"auto"` | Estimate a solid sRGB color from each source border, or supply an RGB tuple for transparent areas, padding, and any removed background |
 | `remove_background` | `False` | Enable foreground segmentation and background replacement |
@@ -100,7 +122,8 @@ assumed sRGB. With `alignment="center"`, the crop is centered on the image and
 matches the requested output aspect ratio before uniform resizing. If
 `eye_distance` is supplied, the scale instead equals the target eye distance
 divided by the measured input eye distance; the image center stays fixed and the
-original eye-line angle is retained. This target is measured along the tilted eye
+original eye-line angle is retained. With `fill_canvas=True`, this scale is bounded
+below by the scale needed to cover the output. The eye-distance target is measured along the tilted eye
 line, not just its horizontal projection. With
 `alignment="eyes"`, the detector supplies five landmarks; an eye-based similarity
 transform translates, rotates, and scales the whole image equally in both axes.
@@ -142,6 +165,9 @@ The recipe retains `background="auto"` when selected, rather than a resolved
 per-image color, and records `alignment` and `remove_background`; per-image metadata
 records `background_removed` and `mask_source`. Without segmentation, `mask_source` is
 `"source_alpha"` and `background_removed` is `False`.
+The recipe and per-image metadata also record `fill_canvas`; per-image
+`eye_distance_clamped` indicates that the coverage requirement increased the
+requested eye distance. `output_eye_distance` always reports the actual result.
 
 `StandardizedFace` is the small return container used by `transform()`; its fields
 are `image`, `mask`, `metadata`, and `baseline` (the unenhanced standardized image,

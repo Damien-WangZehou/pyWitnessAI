@@ -196,7 +196,7 @@ def _validate_lineup(response: dict):
 
 
 def generate_lineup(request: LineupRequest, settings: Settings, lineup_id: str, *, generator_factory=None, standardizer_factory=None) -> dict:
-    """Use the notebook's direct FaceGenerator route, without prompt processing."""
+    """Generate fillers with prompt processing, then standardize all lineup members."""
     # Imports are deferred so schema checks, health checks and fake-provider tests
     # do not need or contact OpenAI and do not download any model.
     if generator_factory is None:
@@ -227,7 +227,7 @@ def generate_lineup(request: LineupRequest, settings: Settings, lineup_id: str, 
     if request.target_lineup == "targetPresent" and not settings.suspect_path.is_file():
         raise FileNotFoundError("The configured suspect portrait is missing.")
 
-    common = dict(description=request.description, parser=RawDescriptionParser(lowercase=False), size="1024x1024", quality="high", output_format="png", write_manifest=True, conversation_model=None, prompt_processor=None)
+    common = dict(description=request.description, parser=RawDescriptionParser(lowercase=False), size="1024x1024", quality="high", output_format="png", write_manifest=True, conversation_model="gpt-6.1-sol", prompt_processor=None)
     if settings.image_model:
         common["model"] = settings.image_model
     generators = []
@@ -243,8 +243,10 @@ def generate_lineup(request: LineupRequest, settings: Settings, lineup_id: str, 
     if request.target_lineup == "targetPresent":
         members.append((settings.suspect_path, "suspect"))
     rng.shuffle(members)
-    standardizer = standardizer_factory(size=(256, 320), alignment="center", background="auto", remove_background=False)
+    standardization = {"size": [256, 320], "alignment": "center", "eye_distance": 0.23, "fill_canvas": True, "background": "auto", "remove_background": False}
+    standardizer = standardizer_factory(**{**standardization, "size": tuple(standardization["size"])})
     items = []
+    standardization_measurements = []
     for position, (source, role) in enumerate(members, 1):
         # All six images follow the same transform and encoding. UUID names avoid
         # leaking a distinct suspect filename to participants.
@@ -253,16 +255,17 @@ def generate_lineup(request: LineupRequest, settings: Settings, lineup_id: str, 
         portrait = standardizer.transform(source)
         portrait.image.convert("RGB").save(destination, format="PNG")
         items.append({"position": position, "image_id": image_id, "image_url": f"/media/{lineup_id}/{image_id}.png", "role": role})
+        standardization_measurements.append({"position": position, "image_id": image_id, "output_eye_distance": portrait.metadata["output_eye_distance"], "eye_distance_clamped": portrait.metadata["eye_distance_clamped"]})
     metadata = {
         "model": str(generators[0].model), "provider": "openai",
-        "prompt_mode": "raw", "prompt_processing": False,
+        "prompt_mode": "conversation", "prompt_processing": True, "conversation_model": common["conversation_model"],
         "reference_image_ids": [p.name for p in references],
         "description_sha256": _digest(request.description),
         "prompts_sha256": [_digest(face.prompt) for face in faces],
-        "standardization": {"size": [256, 320], "alignment": "center", "background": "auto", "remove_background": False},
+        "standardization": standardization,
     }
     result = {"items": items, "metadata": metadata, "suspect_position": next((v["position"] for v in items if v["role"] == "suspect"), None)}
-    manifest = {"request": request.model_dump(), "result": result, "sources_in_display_order": [str(source) for source, _ in members], "generation_prompts": [face.prompt for face in faces], "created_at": _now()}
+    manifest = {"request": request.model_dump(), "result": result, "sources_in_display_order": [str(source) for source, _ in members], "generation_prompts": [face.prompt for face in faces], "standardization_measurements": standardization_measurements, "created_at": _now()}
     (private / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 

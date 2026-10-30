@@ -1,106 +1,140 @@
-# 四条件 AI 生图 lineup 问卷
+# AI-generated lineup survey
 
-导入文件：`AI_Generated_Lineup_4_Conditions.qsf`。原始 QSF 保留不变。
+[Chinese documentation](README-CN.md)
 
-**QSF 已生成，但生成服务尚未部署，`LINEUP_API_BASE_URL` 当前为空。** 导入问卷后可检查全部流程；实际生成参与者的 lineup 前，需运行配套服务、提供 HTTPS 地址，并将该地址填入 Survey Flow。不能在 Qualtrics 中填写本机 `D:/...` 路径来代替服务地址。
+This guide describes the four-condition Qualtrics study and its local lineup service.
 
-## 实验与数据
+## Survey and service configuration
 
-在 verbal description 提交之后、五分钟 Tetris 之前，Qualtrics Randomizer 从下列四个 Embedded Data 元素中均衡随机呈现一个。均衡分配按进入随机器的次数计数，不保证四组最终有效完成样本数完全相同。
+- The survey has already been imported into Qualtrics and is maintained there. After formal testing, the researcher will export its QSF file back into this directory for archiving. Local survey generation is not part of this workflow.
+- The service enables prompt processing with `conversation_model="gpt-6.1-sol"` and standardizes portraits with `eye_distance=0.23` and `fill_canvas=True`.
+- Local tests use fake providers to verify the configured behavior. They do not verify availability of the conversation or image model through live API requests.
 
-| condition | targetLineup | 六人 lineup |
+## Experimental design and data
+
+After the verbal description is submitted and before the five-minute Tetris task, the Qualtrics Randomizer presents one of the following four Embedded Data elements using balanced allocation. Allocation is counted when participants enter the randomizer; it does not guarantee identical numbers of valid completed responses in all four groups.
+
+| condition | targetLineup | Six-person lineup |
 | --- | --- | --- |
-| mixingFaces | targetAbsent | 6 张参考图混合生成的 filler |
-| mixingFaces | targetPresent | 固定嫌疑人 + 5 张参考图混合生成的 filler |
-| noMixing | targetAbsent | 6 张仅描述生成的 filler |
-| noMixing | targetPresent | 固定嫌疑人 + 5 张仅描述生成的 filler |
+| mixingFaces | targetAbsent | Six fillers generated using reference images |
+| mixingFaces | targetPresent | The fixed suspect plus five fillers generated using reference images |
+| noMixing | targetAbsent | Six fillers generated without reference images |
+| noMixing | targetPresent | The fixed suspect plus five fillers generated without reference images |
 
-| 导出字段 | 取值 / 含义 |
+Target-present and target-absent lineups are abbreviated as TP and TA below.
+
+| Export field | Values / meaning |
 | --- | --- |
-| responseType | `suspectId`、`fillerId`、`rejectId` |
-| targetLineup | `targetPresent`、`targetAbsent` |
-| condition | `mixingFaces`、`noMixing` |
-| confidence | 数值字符串 `0`–`100`，间隔 10；技术失败为空 |
-| SelectedPosition / SelectedImage | 最终选择的位置与图片 ID；拒绝时位置为 `NotPresent` |
-| suspectPosition | TP 的嫌疑人位置；TA 为空 |
-| lineup1…lineup6 / …Url / …Role | 实际呈现顺序、图片地址和 `suspect` / `filler` 角色 |
-| FirstResponseType / FirstSelectedPosition / FirstSelectedImage | 首次选择，用于对照修改后的最终选择 |
-| LineupDecisionRTms / LineupDecisionRTs | 所有六张图片加载并同时呈现后，到第一次选择的时间 |
-| LineupFinalDecisionRTms | 从六张图片呈现到提交 lineup 页的时间 |
-| lineupLoadTimeMs | lineup 页打开到全部图片呈现的时间，包含等待生图 |
-| FirstClickonLineupPage / LineupTiming | Qualtrics 原生页面计时，可能包含准备时间；分析识别 RT 时优先使用以上独立计时 |
-| lineupID / generationMetadata | 服务任务 ID、模型、reference 文件名、prompt hash 和标准化参数 |
-| technicalFailure / technicalFailureReason | 技术失败标志和原因；失败不是正式识别类别，`responseType` 留空 |
+| responseType | `suspectId`, `fillerId`, or `rejectId` |
+| targetLineup | `targetPresent` or `targetAbsent` |
+| condition | `mixingFaces` or `noMixing` |
+| confidence | A numeric string from `0` to `100`, in increments of 10; blank for technical failures |
+| SelectedPosition / SelectedImage | The final selected position and image ID; the position is `NotPresent` for a rejection |
+| suspectPosition | The suspect's position in TP lineups; blank in TA lineups |
+| lineup1…lineup6 / …Url / …Role | The actual presentation order, image URLs, and `suspect` / `filler` roles |
+| FirstResponseType / FirstSelectedPosition / FirstSelectedImage | The first selection, for comparison with the final selection after any changes |
+| LineupDecisionRTms / LineupDecisionRTs | Time from all six images being loaded and displayed simultaneously to the first selection |
+| LineupFinalDecisionRTms | Time from the six images being displayed to submission of the lineup page |
+| lineupLoadTimeMs | Time from opening the lineup page to displaying all images, including any wait for image generation |
+| FirstClickonLineupPage / LineupTiming | Native Qualtrics page timing, which may include preparation time; use the separate timings above when analyzing identification response times |
+| lineupID / generationMetadata | The service job ID, models, reference filenames, prompt hashes, and standardization parameters |
+| technicalFailure / technicalFailureReason | A technical-failure flag and reason; failure is not an identification category, and `responseType` remains blank |
 
-没有 designated 人物、没有 `designatedId`。TP 点击嫌疑人记录 `suspectId`；任一组点击 filler 记录 `fillerId`；任一组选择 Not Present 记录 `rejectId`。
+There is no designated lineup member and no `designatedId` response. Selecting the suspect in a TP lineup records `suspectId`; selecting any filler in any condition records `fillerId`; selecting Not Present in any condition records `rejectId`.
 
-保留原有信息页、同意题、视频、描述、Tetris、注意题、人口学题和完成码。Tetris 计时设为 300 秒。lineup 选择后在独立页面询问信心；技术失败分支在信心页之前退出，避免替参与者填入 0%。原有注意题错误即结束的逻辑保留。
+The survey retains the original information page, consent question, video, description task, Tetris, attention checks, demographic questions, and completion code. Tetris is timed for 300 seconds. Confidence is collected on a separate page after the lineup decision. The technical-failure branch exits before the confidence page, so participants are not assigned an artificial confidence rating of 0%. The original termination logic for incorrect attention-check answers is retained. Survey-flow validation is performed in Qualtrics as part of formal testing.
 
-## 生图方法
+## Image generation
 
-两组都直接使用参与者的描述，`RawDescriptionParser(lowercase=False)`、`conversation_model=None`、`prompt_processor=None`，不调用 `prompt_processing`。
+Both conditions pass the participant's description through `RawDescriptionParser(lowercase=False)`. The service sets `conversation_model="gpt-6.1-sol"`, which enables the default `OpenAIPromptProcessor`, even though `prompt_processor=None` is passed. The latter means that no custom processor is supplied; it does not disable the processor selected by `conversation_model`.
 
-- `mixingFaces`：从 `D:/PhD/Software/pyWitnessAI/data/ReferenceFaces_CFD_WhiteMale` 不放回随机取 5 或 6 张参考图，每张参考图分别生成一张 filler（`images.edit`）。
-- `noMixing`：不传参考图，按描述生成 5 或 6 张 filler（`images.generate`）。
-- 固定嫌疑人来自本目录 `perp_refer_to_AI_generated_image.png`，仅在 TP 中加入；不作为 filler 生图参考。
-- 使用 notebook 的图像参数：1024×1024、high、PNG。呈现前全部成员（包括嫌疑人）经过相同 `FaceStandardizer` 中心裁切，统一为 RGB PNG、256×320；再随机打乱位置。
+- `mixingFaces`: randomly sample five or six reference images without replacement from `data/ReferenceFaces_CFD_WhiteMale` under the repository root (on the original machine, `D:/PhD/Software/pyWitnessAI/data/ReferenceFaces_CFD_WhiteMale`). Generate one filler per reference image using `images.edit`; references are used individually, not combined into a single image request.
+- `noMixing`: generate five or six fillers from the description without supplying reference images, using `images.generate`.
+- The fixed suspect is `perp_refer_to_AI_generated_image.png` in this directory. It is added only to TP lineups and is never used as a filler-generation reference.
+- Generation uses the notebook image settings: 1024×1024, high quality, and PNG. Before presentation, all members, including the suspect, are shuffled and processed with the same `FaceStandardizer(alignment="center", eye_distance=0.23, fill_canvas=True)` configuration to produce 256×320 RGB PNGs. The requested eye distance is 23% of the output width, or 58.88 pixels. Scaling must cover the canvas to avoid introducing padded borders when opaque source images are reduced, so the actual eye distance can exceed this target. Each image's actual eye distance and whether the coverage constraint was applied are recorded in `standardization_measurements` in the private `manifest.json`. The first standardization run requires downloading the YuNet face detector.
 
-提示词遵循两个 notebook 的对应分支：mixing 的开头为 `Make a photo of a man based on this image, with the following features: ...`；noMixing 的开头为 `Make a photo of an under average-looking man, with facial features and hair style completely different from each other, but matching the following description: ...`。两者附加相同的肩部以上、灰色背景、正面注视相机要求。因此当前提示词除了参考图操纵外，也保留了 notebook 原有的措辞差异。
+The notebook base prompts use different wording: the mixing prompt begins with `Make a photo of a man based on this image, with the following features: ...`; the no-mixing prompt begins with `Make a photo of an under average-looking man, with facial features and hair style completely different from each other, but matching the following description: ...`. Both add the same requirements for a portrait from the shoulders up, a gray background, and a frontal gaze toward the camera. With prompt processing enabled, these base prompts are input hints for the processor; the final prompts are rebuilt from the original description, a supplementary appearance profile, and the fixed portrait requirements.
 
-统一裁切不等于背景分割或感知外观匹配；正式收集前需要预试检查生成质量、嫌疑人是否突显、视频/Tetris 外链和四组数据导出。未调用付费 API 生成测试图片，也未在真实 Qualtrics 账号中导入或发布。
+The current processing differs between conditions:
 
-## 启动服务并配置问卷
+- `noMixing` plans five or six supplementary profiles together in one batch. Each final prompt starts with `An unretouched candid photograph of an adult in an everyday street setting.`, followed by the original description, that filler's profile, and the fixed portrait requirements. The original `under average-looking` opening is not directly retained.
+- `mixingFaces` creates a separate one-image generator for each reference, so each filler receives its own single-item profile-planning request. The fillers are not planned together as a whole lineup. With the current raw parser, each final prompt begins with `Make a photo of a person based on this image, with the following features:`, followed by the original description, its supplementary profile, reference-compatibility guidance, and the fixed portrait requirements.
 
-在仓库根目录 `D:/PhD/Software/pyWitnessAI` 使用 Python 3.10 或 3.11：
+The manipulation therefore includes differences in prompt wording and profile-planning scope as well as reference-image use. The no-mixing prompt currently combines a street-setting instruction with the fixed gray-background requirement; reconcile this wording before relying on uniform backgrounds. The service records final prompt text and hashes for inspection.
+
+Standardized cropping does not provide background segmentation or guarantee perceptually matched appearance. Before formal data collection, pilot the generation quality, whether the suspect stands out, the external video and Tetris links, and exports from all four conditions. The local checks described here do not generate test images through a paid API or verify import/publication in a live Qualtrics account.
+
+## Start the service and configure the survey
+
+From the repository root, `D:/PhD/Software/pyWitnessAI`, use Python 3.10 or 3.11:
 
 ```powershell
-python -m pip install -e ".[generation]"
+python -m pip install -e ".[generation,standardization]"
 python -m pip install -r studies/Qualtrics_AI_Generate_Lineup_Mixing_with_Reference/requirements.txt
 
-$env:OPENAI_API_KEY = "<你的服务端 API key>"
+$env:OPENAI_API_KEY = "<real API key>"
 $env:ALLOWED_ORIGINS = "https://bristolexppsych.eu.qualtrics.com"
-# 如果需要，显式指定账号可用、同时支持 generate 和 edit 的图像模型：
-$env:IMAGE_MODEL = "<账号可用的图像模型名>"
+# If needed, explicitly select an image model available to your account
+# that supports both generate and edit:
+$env:IMAGE_MODEL = "<image-generation-model>"
 
 python -m uvicorn lineup_service:app --app-dir studies/Qualtrics_AI_Generate_Lineup_Mixing_with_Reference --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-如果 PowerShell 当前已位于本研究子目录，启动命令改为：
+If PowerShell is already in this study directory, use this startup command instead:
 
 ```powershell
 python -m uvicorn lineup_service:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-启动后访问 `http://127.0.0.1:8000/health`（或兼容入口 `/healthz`），应返回 `{"status":"ok","study_version":"ai_generated_lineup_2x2_v1"}`。根路径 `/` 返回服务入口信息，`/docs` 提供 API 文档。这些 GET 请求不会生成图片或调用付费 API。浏览器自动请求 `/favicon.ico` 返回 404 不影响服务。修改服务代码后需重启 uvicorn 才会生效。
+After startup, visit `http://127.0.0.1:8000/health` (or the compatibility route `/healthz`). The expected response is `{"status":"ok","study_version":"ai_generated_lineup_2x2_v1"}`. The root path `/` returns service entry points, and `/docs` provides API documentation. These GET requests do not generate images or call a paid API. A 404 for the browser's automatic `/favicon.ico` request does not affect the service. Restart uvicorn after changing service code.
 
-API key 仅保存在服务端环境；不要填入 QSF 或前端 JavaScript。`IMAGE_MODEL` 未设置时沿用项目当前默认模型；本次没有验证该默认模型在你的账号中是否可用。运行上例前请将尖括号占位符替换成真实配置。
+Keep the API key only in the server environment; do not place it in the QSF file or frontend JavaScript. If `IMAGE_MODEL` is unset, the service uses the project's current default image model. Neither that default nor the hard-coded conversation model has been verified as available to your account. Replace the angle-bracket placeholders with real configuration before running the example.
 
-使用你管理的 HTTPS 反向代理/隧道，将服务的 `/health`、`/v1/lineups`、`/v1/lineups/{id}` 和 `/media/...` 原样转发。此实现是单个研究服务进程，必须使用 **一个 worker**，不要多进程或多实例共享同一个运行目录。公开入口应由研究者控制并限制用量；单纯的 CORS 设置不提供调用者身份验证。
+Use an HTTPS reverse proxy or tunnel that you control to forward `/health`, `/v1/lineups`, `/v1/lineups/{id}`, and `/media/...` without rewriting those paths. This implementation is a single study-service process and must use **one worker**. Do not share the same runtime directory across multiple processes or service instances. The researcher should control the public endpoint and limit usage; CORS settings alone do not authenticate callers.
 
-1. 在 Qualtrics 创建新 survey，导入 `AI_Generated_Lineup_4_Conditions.qsf`。
-2. 在 Survey Flow 最上方 Embedded Data 中，将 `LINEUP_API_BASE_URL` 设置为真实 HTTPS 服务地址，例如 `https://<你的生图服务域名>`；不带 `/v1/lineups`。其余分组字段由随机器设置。
-3. 核对 `ALLOWED_ORIGINS` 与浏览器中问卷页面的真实 origin 一致。多个 origin 用逗号分隔。
-4. 先在 Preview 检查四个分组及导出数据，再发布。要确定检查每组，可在临时测试副本中将 Randomizer 替换为对应组的 Embedded Data；正式版恢复均衡随机器。
+Configure the existing survey in Qualtrics:
 
-也可以在导入前将地址写入文件：
+1. Open the survey that has already been imported into Qualtrics.
+2. In the Embedded Data element at the top of Survey Flow, set `LINEUP_API_BASE_URL` to the real HTTPS service address, such as `https://<your-lineup-service-domain>`, without `/v1/lineups`. The randomizer sets the remaining condition fields.
+3. Check that `ALLOWED_ORIGINS` matches the actual origin of the survey page in the browser. Separate multiple origins with commas.
+4. Check all four conditions and exported data in Preview before publishing. To test a specific condition deterministically, replace the Randomizer with that condition's Embedded Data element in a temporary test copy. Restore the balanced randomizer for the production survey.
+5. After formal testing, export the final QSF from Qualtrics into this study directory to archive the tested survey.
+
+The Tetris page submits a job to start generation early. The lineup page reuses the same job and polls for completion, so the browser does not need to hold a single image-generation request open for the full generation time. Retry reuses the same participant, description, and condition without automatically generating again. Failed or interrupted generation retains its error state for researcher review; participant retries cannot repeatedly incur generation charges. Network or image-loading failures can be retried to retrieve the same result.
+
+Service environment variables:
+
+| Variable | Purpose / default |
+| --- | --- |
+| `REFERENCE_DIR` | Override the default reference-image directory |
+| `SUSPECT_PATH` | Override the default fixed-suspect image path |
+| `LINEUP_STORAGE_DIR` | Persistent storage directory; defaults to `runtime/` in this study directory |
+| `MAX_CONCURRENT_JOBS` | Maximum concurrent generation jobs; default `2` |
+| `MAX_PENDING_JOBS` | Maximum total queued and generating jobs; default `40` |
+| `OPENAI_API_KEY` | Server-side API credential |
+| `IMAGE_MODEL` | Optional image-model override |
+| `ALLOWED_ORIGINS` | Comma-separated allowed survey origins |
+
+Tune the job limits for the expected participant volume, model limits, and measured generation time, and pilot the deployment before data collection. The current conversation model is configured in `lineup_service.py`, not through an environment variable.
+
+`runtime/private/` stores raw generated images, prompts, descriptions, and research records; `runtime/jobs.sqlite3` stores jobs. Only `runtime/media/` serves standardized images publicly. The runtime directory is excluded by this directory's `.gitignore`. Preserve the job database and media to reproduce the lineup each participant actually saw, including when moving or restarting the service.
+
+## Local validation
+
+Install the optional local test dependencies if needed:
 
 ```powershell
-python studies/Qualtrics_AI_Generate_Lineup_Mixing_with_Reference/build_qsf.py --api-base-url "https://<你的生图服务域名>"
+python -m pip install pytest httpx
 ```
 
-Tetris 页提交一次任务来提前生成；lineup 页复用同一任务并轮询，不把一个长时间的图像生成请求挂在浏览器上。Retry 重用相同参与者、描述和条件，不自动重新生图。生成失败/中断后保留错误状态；需研究者检查，不能靠参与者重试反复产生费用。网络或图片加载失败可以 Retry 重新获取同一结果。
-
-服务环境变量：`REFERENCE_DIR`、`SUSPECT_PATH` 可覆盖本机默认资源路径；`LINEUP_STORAGE_DIR` 设置持久存储目录；`MAX_CONCURRENT_JOBS` 默认 2，`MAX_PENDING_JOBS` 默认 40。上线时应按预计参与人数、模型限额和真实生成时长调整并预试。
-
-`runtime/private/` 保存原始生成图、prompt、描述和研究记录；`runtime/jobs.sqlite3` 保存任务；仅 `runtime/media/` 对外提供标准化图片。运行目录已在本目录 `.gitignore` 排除。保留任务数据库与媒体，才能重现参与者实际看到的 lineup；迁移或重启服务时应保留该目录。
-
-## 本地验证
+Run the tests that are present in this checkout:
 
 ```powershell
-python -m pytest studies/Qualtrics_AI_Generate_Lineup_Mixing_with_Reference/tests/test_qsf.py studies/Qualtrics_AI_Generate_Lineup_Mixing_with_Reference/tests/test_lineup_service.py -q
+python -m pytest studies/Qualtrics_AI_Generate_Lineup_Mixing_with_Reference/tests/test_lineup_service.py -q
 node --test studies/Qualtrics_AI_Generate_Lineup_Mixing_with_Reference/tests/test_frontend.cjs
 ```
 
-测试使用假图像生成器，不发送真实生图请求。覆盖随机器/引用/字段、四组人数与角色、幂等重试和持久化、CORS/媒体边界，以及前端选择与计时逻辑。
+The tests use fake providers and do not send real prompt-processing or image-generation requests. They cover prompt-processing status, 23% target eye distance and canvas coverage, lineup size and roles in all four conditions, idempotent retries and persistence, CORS and media boundaries, and frontend selection and timing logic. Passing these checks verifies local behavior, not live model availability. The randomizer, complete survey flow, and Qualtrics exports are checked in the imported survey during formal testing.
 
-Qualtrics 文档：[导入 QSF](https://www.qualtrics.com/support/survey-platform/survey-module/survey-tools/import-and-export-surveys/)、[Randomizer](https://www.qualtrics.com/support/survey-platform/survey-module/survey-flow/standard-elements/randomizer/)、[Embedded Data](https://www.qualtrics.com/support/survey-platform/survey-module/survey-flow/standard-elements/embedded-data/)、[JavaScript](https://www.qualtrics.com/support/survey-platform/survey-module/question-options/add-javascript/)。问卷依赖账号已启用自定义 JavaScript。
+Qualtrics documentation: [Importing QSF](https://www.qualtrics.com/support/survey-platform/survey-module/survey-tools/import-and-export-surveys/), [Randomizer](https://www.qualtrics.com/support/survey-platform/survey-module/survey-flow/standard-elements/randomizer/), [Embedded Data](https://www.qualtrics.com/support/survey-platform/survey-module/survey-flow/standard-elements/embedded-data/), and [JavaScript](https://www.qualtrics.com/support/survey-platform/survey-module/question-options/add-javascript/). The survey requires custom JavaScript to be enabled for the account.

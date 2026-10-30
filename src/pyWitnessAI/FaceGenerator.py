@@ -7,6 +7,7 @@ path. Recorded attributes are requested conditions, not verified image labels.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
@@ -28,7 +29,9 @@ from .FaceAttributeSchema import (
 )
 from .GeneratedFaceDataset import GeneratedFaceDataset
 from .face_generation_backend import ImageGenerationBackend, ImageGenerationRequest, create_image_generation_backend
-from .prompt_processing import PromptProcessor, PromptProcessingRequest, PromptProcessingResult
+from .prompt_processing import (
+    PromptProcessor, PromptProcessingBatchResult, PromptProcessingRequest, PromptProcessingResult,
+)
 
 __all__ = ["FaceGenerator", "GeneratedFace"]
 
@@ -139,6 +142,8 @@ class FaceGenerator:
             raise TypeError("prompt_processor must implement process(request).")
         self.prompt_processor = prompt_processor
         self._processed_prompts: dict[int, tuple[PromptProcessingRequest, PromptProcessingResult]] = {}
+        self._processed_batch_requests: tuple[PromptProcessingRequest, ...] | None = None
+        self._processing_signature: tuple[int, object, bool] | None = None
         self.created_at_utc = datetime.now(timezone.utc).isoformat()
         self.batch_id = f"batch_{uuid4().hex}"
         self.results: list[GeneratedFace] = []
@@ -180,14 +185,23 @@ class FaceGenerator:
         return plans
 
     def _prepared_plans(self, *, process: bool) -> list[tuple[str, str, dict[str, str]]]:
+        if self._processed_batch_requests is not None and self.n != len(self._processed_batch_requests):
+            raise ValueError("Generation conditions changed after prompt processing; create a new FaceGenerator.")
         plans = self._plan_faces()
         if self.prompt_processor is None:
+            if self._processed_prompts:
+                raise ValueError("Generation conditions changed after prompt processing; create a new FaceGenerator.")
             return plans
+        batch_process = getattr(self.prompt_processor, "process_batch", None)
+        use_batch = bool(self.description and self.description.strip()) and callable(batch_process)
+        signature = (id(self.prompt_processor), getattr(self.prompt_processor, "model", None), use_batch)
+        if self._processing_signature is not None and signature != self._processing_signature:
+            raise ValueError("Generation conditions changed after prompt processing; create a new FaceGenerator.")
         if process:
             # Reject missing references and unsupported inputs before any paid call.
             for index, (prompt, _, _) in enumerate(plans, 1):
                 self.backend.validate_request(self._request(index, prompt))
-        prepared = []
+        requests = []
         for index, (base_prompt, description, attributes) in enumerate(plans, 1):
             processing_request = PromptProcessingRequest(
                 original_description=self.description if self.description is not None else description,
@@ -204,6 +218,39 @@ class FaceGenerator:
             cached = self._processed_prompts.get(index)
             if cached is not None and cached[0] != processing_request:
                 raise ValueError("Generation conditions changed after prompt processing; create a new FaceGenerator.")
+            requests.append(processing_request)
+        if self._processed_batch_requests is not None and tuple(requests) != self._processed_batch_requests:
+            raise ValueError("Generation conditions changed after prompt processing; create a new FaceGenerator.")
+        if use_batch:
+            if process and self._processed_batch_requests is None:
+                snapshot = deepcopy(tuple(requests))
+                batch = batch_process(tuple(requests))
+                if not isinstance(batch, PromptProcessingBatchResult):
+                    raise TypeError("prompt_processor.process_batch() must return PromptProcessingBatchResult.")
+                if len(batch.profiles) != self.n:
+                    raise ValueError("Prompt processing must return exactly n supplementary profiles.")
+                # Commit the complete plan only after every result has validated.
+                completed = {}
+                for request, profile in zip(snapshot, batch.profiles):
+                    result = PromptProcessingResult(
+                        prompt=_assemble_profile_prompt(request, profile),
+                        summary=batch.summary, constraints=batch.constraints, conflicts=batch.conflicts,
+                        model=batch.model, provider=batch.provider,
+                        additional_description=profile, strategy="batch_profiles",
+                    )
+                    completed[request.index] = (request, result)
+                self._processed_prompts = completed
+                self._processed_batch_requests = snapshot
+                self._processing_signature = signature
+            return [
+                (self._processed_prompts[index][1].prompt if index in self._processed_prompts else base,
+                 description, attributes)
+                for index, (base, description, attributes) in enumerate(plans, 1)
+            ]
+        prepared = []
+        for processing_request, (base_prompt, description, attributes) in zip(requests, plans):
+            index = processing_request.index
+            cached = self._processed_prompts.get(index)
             if cached is None and process:
                 result = self.prompt_processor.process(processing_request)
                 if not isinstance(result, PromptProcessingResult):
@@ -213,8 +260,9 @@ class FaceGenerator:
                 if _PORTRAIT_INSTRUCTIONS not in prompt:
                     prompt += "\n\n" + _PORTRAIT_INSTRUCTIONS
                 result = replace(result, prompt=prompt)
-                cached = (processing_request, result)
+                cached = (deepcopy(processing_request), result)
                 self._processed_prompts[index] = cached
+                self._processing_signature = signature
             prepared.append((cached[1].prompt if cached is not None else base_prompt, description, attributes))
         return prepared
 
@@ -343,6 +391,8 @@ class FaceGenerator:
             filler_profile=result.filler_profile,
             base_prompt=result.base_prompt,
             prompt_processing_mode="conversation" if processing is not None else "direct",
+            prompt_processing_strategy=processing.strategy if processing is not None else "",
+            prompt_processing_additional_description=processing.additional_description if processing is not None else "",
             prompt_processing_provider=processing.provider if processing is not None else "",
             prompt_processing_model=processing.model if processing is not None else "",
             prompt_processing_summary=processing.summary if processing is not None else "",
@@ -357,6 +407,30 @@ class FaceGenerator:
 
     def __repr__(self) -> str:
         return f"FaceGenerator(mode={self.generation_mode!r}, n={self.n}, backend={self.provider!r}, output_dir={str(self.output_dir)!r})"
+
+
+def _assemble_profile_prompt(request: PromptProcessingRequest, profile: str) -> str:
+    """Keep the full source wording and add one planned appearance locally."""
+    # Parser hints must not introduce an appearance constraint of their own.
+    gender = request.attributes.get("gender") if request.attributes_authoritative else None
+    subject = {"male": "man", "female": "woman", "non-binary": "person"}.get(
+        gender, "person",
+    )
+    if request.reference_image is not None:
+        opening = f"Make a photo of a {subject} based on this image, with the following features: "
+    else:
+        opening = "An unretouched candid photograph of an adult in an everyday street setting. "
+    parts = [opening + request.original_description]
+    if request.attributes_authoritative and request.attributes:
+        parts.append(
+            "Explicit experimental controls (these take precedence over conflicting description traits): "
+            + json.dumps(request.attributes, ensure_ascii=False, sort_keys=True)
+        )
+    parts.append(profile)
+    if request.reference_image is not None:
+        parts.append("Use the reference image only for features compatible with the description, controls, and additions above.")
+    parts.append(request.portrait_instructions)
+    return "\n\n".join(parts)
 
 
 def _sample_description(schema: FaceAttributeSchema, rng: random.Random) -> ParsedDescription:
